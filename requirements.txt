@@ -1,0 +1,4 @@
+-e external/disco_rl
+-e external/Craftax
+chex
+dm-env
