@@ -56,3 +56,6 @@ python train.py \
 
 The Disco103 weights are loaded from `external/disco_rl` by default. Use
 `--weights_path` to point to a different copy if needed.
+
+Notes:
+- `--num_envs` is the number of vectorized Craftax environments on a single device.

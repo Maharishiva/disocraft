@@ -20,9 +20,6 @@ from disco_rl import utils
 from disco_rl.environments import base as disco_base_env
 
 
-AXIS_NAME = "i"
-
-
 @chex.dataclass(mappable_dataclass=False)
 class CraftaxEnvState:
     state: chex.ArrayTree
@@ -114,14 +111,15 @@ class CraftaxBatchedEnvironment(disco_base_env.Environment):
 class SimpleReplayBuffer:
     """A simple FIFO replay buffer for JAX arrays."""
 
-    def __init__(self, capacity: int, seed: int):
+    def __init__(self, capacity: int, seed: int, batch_axis: int = 1):
         self.buffer = collections.deque(maxlen=capacity)
         self.capacity = capacity
         self.np_rng = np.random.default_rng(seed)
+        self.batch_axis = batch_axis
 
     def add(self, rollout: types.ActorRollout) -> None:
         rollout = jax.device_get(rollout)
-        split_tree = rlax.tree_split_leaves(rollout, axis=2)
+        split_tree = rlax.tree_split_leaves(rollout, axis=self.batch_axis)
         self.buffer.extend(split_tree)
 
     def sample(self, batch_size: int) -> types.ActorRollout | None:
@@ -132,7 +130,7 @@ class SimpleReplayBuffer:
 
         indices = self.np_rng.integers(buffer_size, size=batch_size)
         batched_samples = utils.tree_stack(
-            [self.buffer[i] for i in indices], axis=2
+            [self.buffer[i] for i in indices], axis=self.batch_axis
         )
         return batched_samples
 
@@ -194,9 +192,10 @@ def accumulate_rewards(acc_rewards, x):
 
 
 def summarize_returns(returns: np.ndarray, discounts: np.ndarray) -> float:
-    total_returns = (returns * (1 - discounts)).sum(axis=(1, 2))
-    total_episodes = (1 - discounts).sum(axis=(1, 2))
-    return float(total_returns.sum() / max(total_episodes.sum(), 1))
+    axes = tuple(range(returns.ndim))
+    total_returns = (returns * (1 - discounts)).sum(axis=axes)
+    total_episodes = (1 - discounts).sum(axis=axes)
+    return float(total_returns / max(total_episodes, 1))
 
 
 def parse_args() -> argparse.Namespace:
@@ -222,13 +221,7 @@ def train(args: argparse.Namespace) -> None:
     devices = tuple(jax.devices())
     if not devices:
         raise RuntimeError("No JAX devices available.")
-
-    if args.num_envs > len(devices):
-        raise ValueError(
-            f"--num_envs={args.num_envs} exceeds available devices "
-            f"({len(devices)})."
-        )
-    devices = devices[: args.num_envs]
+    device = devices[0]
 
     dense = tuple(int(x) for x in args.dense.split(",") if x.strip())
     agent_settings = agent_lib.get_settings_disco()
@@ -251,7 +244,7 @@ def train(args: argparse.Namespace) -> None:
         agent_settings=agent_settings,
         single_observation_spec=env.single_observation_spec(),
         single_action_spec=env.single_action_spec(),
-        batch_axis_name=AXIS_NAME,
+        batch_axis_name=None,
     )
 
     weights_path = resolve_weights_path(args.weights_path)
@@ -271,7 +264,9 @@ def train(args: argparse.Namespace) -> None:
     learner_state = agent.initial_learner_state(learner_rng)
     actor_state = agent.initial_actor_state(actor_rng)
 
-    buffer = SimpleReplayBuffer(capacity=args.buffer_capacity, seed=args.seed)
+    buffer = SimpleReplayBuffer(
+        capacity=args.buffer_capacity, seed=args.seed, batch_axis=1
+    )
     min_buffer_size = args.batch_size
 
     def unroll_jittable_actor(params, actor_state, ts, env_state, rng):
@@ -291,25 +286,16 @@ def train(args: argparse.Namespace) -> None:
         actor_rollout = types.ActorRollout.from_timestep(actor_rollout)
         return actor_rollout, actor_state, ts, env_state
 
-    learner_step_fn = jax.pmap(
-        agent.learner_step,
-        axis_name=AXIS_NAME,
-        devices=devices,
-        static_broadcasted_argnums=(5,),
-    )
-    unroll_actor_fn = jax.pmap(
-        unroll_jittable_actor, axis_name=AXIS_NAME, devices=devices
-    )
-    acc_rewards_fn = jax.pmap(
-        accumulate_rewards, axis_name=AXIS_NAME, devices=devices
-    )
+    learner_step_fn = jax.jit(agent.learner_step, static_argnums=(5,))
+    unroll_actor_fn = jax.jit(unroll_jittable_actor)
+    acc_rewards_fn = jax.jit(accumulate_rewards)
 
-    learner_state = jax.device_put_replicated(learner_state, devices)
-    actor_state = jax.device_put_replicated(actor_state, devices)
-    update_rule_params = jax.device_put_replicated(disco_103_params, devices)
-    env_state, ts, acc_rewards = utils.shard_across_devices(
-        (env_state, ts, acc_rewards), devices
-    )
+    learner_state = jax.device_put(learner_state, device)
+    actor_state = jax.device_put(actor_state, device)
+    update_rule_params = jax.device_put(disco_103_params, device)
+    env_state = jax.device_put(env_state, device)
+    ts = jax.device_put(ts, device)
+    acc_rewards = jax.device_put(acc_rewards, device)
 
     total_steps = 0
     last_log_step = 0
@@ -321,7 +307,6 @@ def train(args: argparse.Namespace) -> None:
 
     for step in trange(args.num_iterations):
         rng, rng_actor, rng_learner = jax.random.split(rng, 3)
-        rng_actor = jax.random.split(rng_actor, len(devices))
 
         actor_rollout, actor_state, ts, env_state = unroll_actor_fn(
             learner_state.params, actor_state, ts, env_state, rng_actor
@@ -334,7 +319,6 @@ def train(args: argparse.Namespace) -> None:
             (actor_rollout.rewards, actor_rollout.discounts),
         )
 
-        rng_learner = jax.random.split(rng_learner, len(devices))
         metrics = None
         if len(buffer) >= min_buffer_size:
             learner_rollout = buffer.sample(args.batch_size)
