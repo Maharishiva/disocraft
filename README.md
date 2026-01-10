@@ -19,11 +19,10 @@ Install JAX first (CPU or GPU, choose one):
 pip install -U "jax[cpu]"
 ```
 
-Clone external dependencies if you do not already have them:
+Initialize submodules:
 
 ```bash
-git clone https://github.com/google-deepmind/disco_rl.git external/disco_rl
-git clone https://github.com/MichaelTMatthews/Craftax.git external/Craftax
+git submodule update --init --recursive
 ```
 
 Then install the local clones + extra deps:

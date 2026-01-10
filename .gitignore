@@ -4,6 +4,5 @@
 .mplconfig/
 .venv/
 __pycache__/
-external/
 runs/
 *.pyc

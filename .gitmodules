@@ -1,0 +1,6 @@
+[submodule "external/disco_rl"]
+	path = external/disco_rl
+	url = https://github.com/google-deepmind/disco_rl.git
+[submodule "external/Craftax"]
+	path = external/Craftax
+	url = https://github.com/MichaelTMatthews/Craftax.git
