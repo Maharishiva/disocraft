@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-import collections
+import math
 from pathlib import Path
 
 import chex
@@ -11,12 +11,10 @@ from dm_env import specs as dm_specs
 import jax
 import jax.numpy as jnp
 import numpy as np
-import rlax
 
 from craftax.craftax_env import make_craftax_env_from_name
 from disco_rl import agent as agent_lib
 from disco_rl import types
-from disco_rl import utils
 from disco_rl.environments import base as disco_base_env
 
 
@@ -108,34 +106,23 @@ class CraftaxBatchedEnvironment(disco_base_env.Environment):
         return self._single_observation_spec
 
 
-class SimpleReplayBuffer:
-    """A simple FIFO replay buffer for JAX arrays."""
+@chex.dataclass(mappable_dataclass=False)
+class ReplayBufferState:
+    data: types.ActorRollout
+    idx: chex.Array
+    size: chex.Array
 
-    def __init__(self, capacity: int, seed: int, batch_axis: int = 1):
-        self.buffer = collections.deque(maxlen=capacity)
-        self.capacity = capacity
-        self.np_rng = np.random.default_rng(seed)
-        self.batch_axis = batch_axis
 
-    def add(self, rollout: types.ActorRollout) -> None:
-        rollout = jax.device_get(rollout)
-        split_tree = rlax.tree_split_leaves(rollout, axis=self.batch_axis)
-        self.buffer.extend(split_tree)
-
-    def sample(self, batch_size: int) -> types.ActorRollout | None:
-        buffer_size = len(self.buffer)
-        if buffer_size == 0:
-            print("Warning: Trying to sample from an empty buffer.")
-            return None
-
-        indices = self.np_rng.integers(buffer_size, size=batch_size)
-        batched_samples = utils.tree_stack(
-            [self.buffer[i] for i in indices], axis=self.batch_axis
-        )
-        return batched_samples
-
-    def __len__(self) -> int:
-        return len(self.buffer)
+@chex.dataclass(mappable_dataclass=False)
+class TrainLoopState:
+    rng: chex.PRNGKey
+    env_state: CraftaxEnvState
+    timestep: types.EnvironmentTimestep
+    learner_state: agent_lib.LearnerState
+    actor_state: chex.ArrayTree
+    buffer: ReplayBufferState
+    acc_rewards: chex.Array
+    total_steps: chex.Array
 
 
 def unflatten_params(flat_params: dict[str, np.ndarray]) -> dict[str, dict[str, np.ndarray]]:
@@ -190,12 +177,70 @@ def accumulate_rewards(acc_rewards, x):
 
     return jax.lax.scan(_step_fn, acc_rewards, (rewards, discounts))
 
+def swap_time_batch(rollout: types.ActorRollout) -> types.ActorRollout:
+    return jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), rollout)
 
-def summarize_returns(returns: np.ndarray, discounts: np.ndarray) -> float:
-    axes = tuple(range(returns.ndim))
-    total_returns = (returns * (1 - discounts)).sum(axis=axes)
-    total_episodes = (1 - discounts).sum(axis=axes)
-    return float(total_returns / max(total_episodes, 1))
+
+def init_replay_buffer(
+    example_rollout: types.ActorRollout, capacity: int
+) -> ReplayBufferState:
+    rollout_bt = swap_time_batch(example_rollout)
+    data = jax.tree.map(
+        lambda x: jnp.zeros((capacity,) + x.shape[1:], dtype=x.dtype),
+        rollout_bt,
+    )
+    return ReplayBufferState(
+        data=data,
+        idx=jnp.array(0, dtype=jnp.int32),
+        size=jnp.array(0, dtype=jnp.int32),
+    )
+
+
+def replay_buffer_add(
+    buffer: ReplayBufferState,
+    rollout_bt: types.ActorRollout,
+    capacity: int,
+) -> ReplayBufferState:
+    batch_size = rollout_bt.rewards.shape[0]
+    indices = (buffer.idx + jnp.arange(batch_size)) % capacity
+    data = jax.tree.map(lambda buf, x: buf.at[indices].set(x), buffer.data, rollout_bt)
+    idx = (buffer.idx + batch_size) % capacity
+    size = jnp.minimum(capacity, buffer.size + batch_size)
+    return ReplayBufferState(data=data, idx=idx, size=size)
+
+
+def replay_buffer_sample(
+    buffer: ReplayBufferState, rng: chex.PRNGKey, batch_size: int
+) -> types.ActorRollout:
+    indices = jax.random.randint(rng, (batch_size,), 0, buffer.size)
+    return jax.tree.map(lambda buf: buf[indices], buffer.data)
+
+
+def sample_mixed_batch(
+    rng: chex.PRNGKey,
+    rollout_bt: types.ActorRollout,
+    buffer: ReplayBufferState,
+    on_policy_count: int,
+    replay_count: int,
+) -> types.ActorRollout:
+    rng, on_rng, replay_rng, perm_rng = jax.random.split(rng, 4)
+    on_indices = jax.random.randint(
+        on_rng, (on_policy_count,), 0, rollout_bt.rewards.shape[0]
+    )
+    on_policy = jax.tree.map(lambda x: x[on_indices], rollout_bt)
+    replay = replay_buffer_sample(buffer, replay_rng, replay_count)
+    combined = jax.tree.map(
+        lambda a, b: jnp.concatenate([a, b], axis=0), on_policy, replay
+    )
+    perm = jax.random.permutation(perm_rng, on_policy_count + replay_count)
+    combined = jax.tree.map(lambda x: x[perm], combined)
+    return swap_time_batch(combined)
+
+
+def summarize_returns_jax(returns: chex.Array, discounts: chex.Array) -> chex.Array:
+    total_returns = jnp.sum(returns * (1.0 - discounts))
+    total_episodes = jnp.sum(1.0 - discounts)
+    return jnp.where(total_episodes > 0, total_returns / total_episodes, 0.0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -209,7 +254,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=24)
     parser.add_argument("--updates_per_iter", type=int, default=1)
     parser.add_argument("--replay_fraction", type=float, default=0.99)
-    parser.add_argument("--buffer_capacity", type=int, default=400000)
+    parser.add_argument("--buffer_capacity", type=int, default=None)
+    parser.add_argument("--buffer_capacity_transitions", type=int, default=400000)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--dense", type=str, default="512,512")
     parser.add_argument("--lstm_size", type=int, default=128)
@@ -223,42 +269,28 @@ def clamp_replay_fraction(replay_fraction: float) -> float:
     return float(np.clip(replay_fraction, 0.0, 1.0))
 
 
-def sample_mixed_rollout(
-    actor_rollout: types.ActorRollout,
-    buffer: SimpleReplayBuffer,
-    batch_size: int,
-    replay_fraction: float,
-) -> types.ActorRollout:
-    on_policy_count = buffer.np_rng.binomial(
-        batch_size, 1.0 - replay_fraction
-    )
-    replay_count = batch_size - on_policy_count
-    if on_policy_count == 0:
-        return buffer.sample(batch_size)
-
-    actor_rollout = jax.device_get(actor_rollout)
-    on_policy_pool = rlax.tree_split_leaves(actor_rollout, axis=1)
-    on_policy_indices = buffer.np_rng.integers(
-        len(on_policy_pool), size=on_policy_count
-    )
-    on_policy_samples = [on_policy_pool[i] for i in on_policy_indices]
-
-    replay_samples: list[types.ActorRollout] = []
-    if replay_count > 0:
-        replay_rollout = buffer.sample(replay_count)
-        replay_samples = list(rlax.tree_split_leaves(replay_rollout, axis=1))
-
-    combined = on_policy_samples + replay_samples
-    buffer.np_rng.shuffle(combined)
-    return utils.tree_stack(combined, axis=1)
-
-
 def train(args: argparse.Namespace) -> None:
-    devices = tuple(jax.devices())
-    if not devices:
+    if not jax.devices():
         raise RuntimeError("No JAX devices available.")
-    device = devices[0]
 
+    replay_fraction = clamp_replay_fraction(args.replay_fraction)
+    on_policy_count = int(round((1.0 - replay_fraction) * args.batch_size))
+    if replay_fraction < 1.0 and on_policy_count == 0:
+        on_policy_count = 1
+    replay_count = args.batch_size - on_policy_count
+    if replay_count < 0:
+        raise ValueError("replay_fraction yields negative replay count.")
+
+    if args.buffer_capacity is None:
+        buffer_capacity = int(
+            math.ceil(args.buffer_capacity_transitions / args.rollout_len)
+        )
+    else:
+        buffer_capacity = int(args.buffer_capacity)
+    if buffer_capacity <= 0:
+        raise ValueError("buffer_capacity must be positive.")
+
+    steps_per_iter = args.num_envs * args.rollout_len
     dense = tuple(int(x) for x in args.dense.split(",") if x.strip())
     agent_settings = agent_lib.get_settings_disco()
     agent_settings.learning_rate = args.learning_rate
@@ -300,13 +332,41 @@ def train(args: argparse.Namespace) -> None:
     learner_state = agent.initial_learner_state(learner_rng)
     actor_state = agent.initial_actor_state(actor_rng)
 
-    replay_fraction = clamp_replay_fraction(args.replay_fraction)
-    buffer = SimpleReplayBuffer(
-        capacity=args.buffer_capacity, seed=args.seed, batch_axis=1
+    dummy_obs = jax.tree.map(
+        lambda spec: jnp.zeros((args.num_envs,) + spec.shape, dtype=spec.dtype),
+        env.single_observation_spec(),
     )
-    min_buffer_size = 1 if replay_fraction > 0.0 else 0
+    dummy_ts = types.EnvironmentTimestep(
+        observation=dummy_obs,
+        step_type=jnp.zeros((args.num_envs,), dtype=jnp.int32),
+        reward=jnp.zeros((args.num_envs,), dtype=jnp.float32),
+    )
+    dummy_timestep, _ = agent.actor_step(
+        learner_state.params, jax.random.PRNGKey(0), dummy_ts, actor_state
+    )
+    dummy_rollout = types.ActorRollout.from_timestep(
+        jax.tree.map(
+            lambda x: jnp.zeros((args.rollout_len,) + x.shape, dtype=x.dtype),
+            dummy_timestep,
+        )
+    )
+    buffer = init_replay_buffer(dummy_rollout, buffer_capacity)
+    update_rule_params = disco_103_params
 
-    def unroll_jittable_actor(params, actor_state, ts, env_state, rng):
+    expected_on_policy = (1.0 - replay_fraction) * args.batch_size
+    expected_replay = replay_fraction * args.batch_size
+    buffer_transitions = buffer_capacity * args.rollout_len
+    print(
+        "Replay mix: "
+        f"target_r={replay_fraction:.3f} "
+        f"expected_on_policy={expected_on_policy:.2f} "
+        f"expected_replay={expected_replay:.2f} "
+        f"updates_per_iter={args.updates_per_iter} "
+        f"buffer_chunks={buffer_capacity} "
+        f"buffer_transitions={buffer_transitions}"
+    )
+
+    def unroll_actor(params, actor_state, ts, env_state, rng):
         def _single_step(carry, step_rng):
             env_state, ts, actor_state = carry
             actor_timestep, actor_state = agent.actor_step(
@@ -323,92 +383,119 @@ def train(args: argparse.Namespace) -> None:
         actor_rollout = types.ActorRollout.from_timestep(actor_rollout)
         return actor_rollout, actor_state, ts, env_state
 
-    learner_step_fn = jax.jit(agent.learner_step, static_argnums=(5,))
-    unroll_actor_fn = jax.jit(unroll_jittable_actor)
-    acc_rewards_fn = jax.jit(accumulate_rewards)
-
-    learner_state = jax.device_put(learner_state, device)
-    actor_state = jax.device_put(actor_state, device)
-    update_rule_params = jax.device_put(disco_103_params, device)
-    env_state = jax.device_put(env_state, device)
-    ts = jax.device_put(ts, device)
-    acc_rewards = jax.device_put(acc_rewards, device)
-
-    total_steps = 0
-    last_log_step = 0
-    expected_on_policy = (1.0 - replay_fraction) * args.batch_size
-    expected_replay = replay_fraction * args.batch_size
-    print(
-        "Replay mix: "
-        f"target_r={replay_fraction:.3f} "
-        f"expected_on_policy={expected_on_policy:.2f} "
-        f"expected_replay={expected_replay:.2f} "
-        f"updates_per_iter={args.updates_per_iter}"
-    )
-
-    try:
-        from tqdm import trange
-    except ImportError:
-        trange = range
-
-    for step in trange(args.num_iterations):
-        rng, rng_actor, rng_learner = jax.random.split(rng, 3)
-
-        actor_rollout, actor_state, ts, env_state = unroll_actor_fn(
-            learner_state.params, actor_state, ts, env_state, rng_actor
+    def _log_callback(args):
+        step, total_steps, avg_return, loss, grad_norm = args
+        print(
+            f"iter={int(step)} steps={int(total_steps)} "
+            f"avg_return={float(avg_return):.3f} "
+            f"loss={float(loss):.4f} grad_norm={float(grad_norm):.4f}"
         )
-        buffer.add(actor_rollout)
 
-        total_steps += np.prod(actor_rollout.rewards.shape)
-        acc_rewards, returns = acc_rewards_fn(
+    log_every = int(args.log_every)
+    enable_logging = log_every > 0
+
+    def train_step(state: TrainLoopState, _):
+        rng, env_state, ts, learner_state, actor_state, buffer, acc_rewards, total_steps = (
+            state.rng,
+            state.env_state,
+            state.timestep,
+            state.learner_state,
+            state.actor_state,
+            state.buffer,
+            state.acc_rewards,
+            state.total_steps,
+        )
+        rng, rollout_rng, sample_rng, update_rng = jax.random.split(rng, 4)
+
+        actor_rollout, actor_state, ts, env_state = unroll_actor(
+            learner_state.params, actor_state, ts, env_state, rollout_rng
+        )
+        rollout_bt = swap_time_batch(actor_rollout)
+        buffer = replay_buffer_add(buffer, rollout_bt, buffer_capacity)
+
+        acc_rewards, returns = accumulate_rewards(
             acc_rewards,
             (actor_rollout.rewards, actor_rollout.discounts),
         )
 
-        metrics = None
-        if len(buffer) >= min_buffer_size:
-            learner_rngs = jax.random.split(
-                rng_learner, max(args.updates_per_iter, 1)
+        learner_rollout = sample_mixed_batch(
+            sample_rng,
+            rollout_bt,
+            buffer,
+            on_policy_count,
+            replay_count,
+        )
+
+        update_rngs = jax.random.split(update_rng, args.updates_per_iter)
+
+        def _update_step(learner_state, rng):
+            learner_state, _, metrics = agent.learner_step(
+                rng,
+                learner_rollout,
+                learner_state,
+                actor_state,
+                update_rule_params,
+                False,
             )
-            for update_rng in learner_rngs:
-                learner_rollout = sample_mixed_rollout(
-                    actor_rollout,
-                    buffer,
-                    args.batch_size,
-                    replay_fraction,
-                )
-                learner_state, _, metrics = learner_step_fn(
-                    update_rng,
-                    learner_rollout,
-                    learner_state,
-                    actor_state,
-                    update_rule_params,
-                    False,
-                )
+            return learner_state, metrics
 
-        if (step + 1) % args.log_every == 0:
-            returns_host = np.array(jax.device_get(returns))
-            discounts_host = np.array(jax.device_get(actor_rollout.discounts))
-            avg_return = summarize_returns(returns_host, discounts_host)
+        learner_state, metrics_stack = jax.lax.scan(
+            _update_step, learner_state, update_rngs
+        )
+        metrics = jax.tree.map(lambda x: x[-1], metrics_stack)
 
-            msg = (
-                f"iter={step + 1} steps={total_steps} "
-                f"avg_return={avg_return:.3f}"
-            )
-            if metrics is not None:
-                metrics_host = jax.tree.map(
-                    lambda x: float(np.mean(np.array(x))),
-                    jax.device_get(metrics),
-                )
-                msg += (
-                    f" loss={metrics_host.get('total_loss', 0.0):.4f} "
-                    f"grad_norm={metrics_host.get('global_gradient_norm', 0.0):.4f}"
-                )
-            print(msg)
-            last_log_step = total_steps
+        total_steps = total_steps + steps_per_iter
+        iter_idx = total_steps // steps_per_iter
+        avg_return = summarize_returns_jax(returns, actor_rollout.discounts)
+        loss = metrics.get("total_loss", jnp.array(0.0))
+        grad_norm = metrics.get("global_gradient_norm", jnp.array(0.0))
 
-    if last_log_step == 0:
-        print("Finished without logging; increase --num_iterations or reduce --log_every.")
+        if enable_logging:
+            do_log = iter_idx % log_every == 0
+
+            def _log(_):
+                jax.debug.callback(
+                    _log_callback,
+                    (iter_idx, total_steps, avg_return, loss, grad_norm),
+                )
+                return None
+
+            jax.lax.cond(do_log, _log, lambda _: None, operand=None)
+
+        new_state = TrainLoopState(
+            rng=rng,
+            env_state=env_state,
+            timestep=ts,
+            learner_state=learner_state,
+            actor_state=actor_state,
+            buffer=buffer,
+            acc_rewards=acc_rewards,
+            total_steps=total_steps,
+        )
+        metrics_out = dict(
+            steps=total_steps,
+            avg_return=avg_return,
+            loss=loss,
+            grad_norm=grad_norm,
+        )
+        return new_state, metrics_out
+
+    init_state = TrainLoopState(
+        rng=rng,
+        env_state=env_state,
+        timestep=ts,
+        learner_state=learner_state,
+        actor_state=actor_state,
+        buffer=buffer,
+        acc_rewards=acc_rewards,
+        total_steps=jnp.array(0, dtype=jnp.int64),
+    )
+
+    def train_loop(state):
+        return jax.lax.scan(train_step, state, xs=None, length=args.num_iterations)
+
+    train_loop_jit = jax.jit(train_loop)
+    train_loop_jit(init_state)
 
 
 if __name__ == "__main__":
