@@ -205,16 +205,53 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--env_name", default="Craftax-Symbolic-v1")
     parser.add_argument("--num_envs", type=int, default=1)
     parser.add_argument("--num_iterations", type=int, default=1000)
-    parser.add_argument("--rollout_len", type=int, default=32)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--buffer_capacity", type=int, default=2048)
+    parser.add_argument("--rollout_len", type=int, default=29)
+    parser.add_argument("--batch_size", type=int, default=24)
+    parser.add_argument("--updates_per_iter", type=int, default=1)
+    parser.add_argument("--replay_fraction", type=float, default=0.99)
+    parser.add_argument("--buffer_capacity", type=int, default=400000)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--weight_decay", type=float, default=0.3)
     parser.add_argument("--dense", type=str, default="512,512")
     parser.add_argument("--lstm_size", type=int, default=128)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--weights_path", type=str, default=None)
     return parser.parse_args()
+
+
+def clamp_replay_fraction(replay_fraction: float) -> float:
+    return float(np.clip(replay_fraction, 0.0, 1.0))
+
+
+def sample_mixed_rollout(
+    actor_rollout: types.ActorRollout,
+    buffer: SimpleReplayBuffer,
+    batch_size: int,
+    replay_fraction: float,
+) -> types.ActorRollout:
+    on_policy_count = buffer.np_rng.binomial(
+        batch_size, 1.0 - replay_fraction
+    )
+    replay_count = batch_size - on_policy_count
+    if on_policy_count == 0:
+        return buffer.sample(batch_size)
+
+    actor_rollout = jax.device_get(actor_rollout)
+    on_policy_pool = rlax.tree_split_leaves(actor_rollout, axis=1)
+    on_policy_indices = buffer.np_rng.integers(
+        len(on_policy_pool), size=on_policy_count
+    )
+    on_policy_samples = [on_policy_pool[i] for i in on_policy_indices]
+
+    replay_samples: list[types.ActorRollout] = []
+    if replay_count > 0:
+        replay_rollout = buffer.sample(replay_count)
+        replay_samples = rlax.tree_split_leaves(replay_rollout, axis=1)
+
+    combined = on_policy_samples + replay_samples
+    buffer.np_rng.shuffle(combined)
+    return utils.tree_stack(combined, axis=1)
 
 
 def train(args: argparse.Namespace) -> None:
@@ -226,6 +263,7 @@ def train(args: argparse.Namespace) -> None:
     dense = tuple(int(x) for x in args.dense.split(",") if x.strip())
     agent_settings = agent_lib.get_settings_disco()
     agent_settings.learning_rate = args.learning_rate
+    agent_settings.weight_decay = args.weight_decay
     agent_settings.net_settings.name = "mlp"
     agent_settings.net_settings.net_args = dict(
         dense=dense,
@@ -264,10 +302,11 @@ def train(args: argparse.Namespace) -> None:
     learner_state = agent.initial_learner_state(learner_rng)
     actor_state = agent.initial_actor_state(actor_rng)
 
+    replay_fraction = clamp_replay_fraction(args.replay_fraction)
     buffer = SimpleReplayBuffer(
         capacity=args.buffer_capacity, seed=args.seed, batch_axis=1
     )
-    min_buffer_size = args.batch_size
+    min_buffer_size = 1 if replay_fraction > 0.0 else 0
 
     def unroll_jittable_actor(params, actor_state, ts, env_state, rng):
         def _single_step(carry, step_rng):
@@ -299,6 +338,15 @@ def train(args: argparse.Namespace) -> None:
 
     total_steps = 0
     last_log_step = 0
+    expected_on_policy = (1.0 - replay_fraction) * args.batch_size
+    expected_replay = replay_fraction * args.batch_size
+    print(
+        "Replay mix: "
+        f"target_r={replay_fraction:.3f} "
+        f"expected_on_policy={expected_on_policy:.2f} "
+        f"expected_replay={expected_replay:.2f} "
+        f"updates_per_iter={args.updates_per_iter}"
+    )
 
     try:
         from tqdm import trange
@@ -321,15 +369,24 @@ def train(args: argparse.Namespace) -> None:
 
         metrics = None
         if len(buffer) >= min_buffer_size:
-            learner_rollout = buffer.sample(args.batch_size)
-            learner_state, _, metrics = learner_step_fn(
-                rng_learner,
-                learner_rollout,
-                learner_state,
-                actor_state,
-                update_rule_params,
-                False,
+            learner_rngs = jax.random.split(
+                rng_learner, max(args.updates_per_iter, 1)
             )
+            for update_rng in learner_rngs:
+                learner_rollout = sample_mixed_rollout(
+                    actor_rollout,
+                    buffer,
+                    args.batch_size,
+                    replay_fraction,
+                )
+                learner_state, _, metrics = learner_step_fn(
+                    update_rng,
+                    learner_rollout,
+                    learner_state,
+                    actor_state,
+                    update_rule_params,
+                    False,
+                )
 
         if (step + 1) % args.log_every == 0:
             returns_host = np.array(jax.device_get(returns))
