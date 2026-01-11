@@ -246,7 +246,7 @@ def sample_mixed_rollout(
     replay_samples: list[types.ActorRollout] = []
     if replay_count > 0:
         replay_rollout = buffer.sample(replay_count)
-        replay_samples = rlax.tree_split_leaves(replay_rollout, axis=1)
+        replay_samples = list(rlax.tree_split_leaves(replay_rollout, axis=1))
 
     combined = on_policy_samples + replay_samples
     buffer.np_rng.shuffle(combined)
