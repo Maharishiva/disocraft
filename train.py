@@ -220,21 +220,29 @@ def sample_mixed_batch(
     rng: chex.PRNGKey,
     rollout_bt: types.ActorRollout,
     buffer: ReplayBufferState,
-    on_policy_count: int,
-    replay_count: int,
+    batch_size: int,
+    replay_fraction: float,
 ) -> types.ActorRollout:
-    rng, on_rng, replay_rng, perm_rng = jax.random.split(rng, 4)
+    rng, on_rng, replay_rng, mix_rng, perm_rng = jax.random.split(rng, 5)
+
     on_indices = jax.random.randint(
-        on_rng, (on_policy_count,), 0, rollout_bt.rewards.shape[0]
+        on_rng, (batch_size,), 0, rollout_bt.rewards.shape[0]
     )
     on_policy = jax.tree.map(lambda x: x[on_indices], rollout_bt)
-    replay = replay_buffer_sample(buffer, replay_rng, replay_count)
-    combined = jax.tree.map(
-        lambda a, b: jnp.concatenate([a, b], axis=0), on_policy, replay
+    replay = replay_buffer_sample(buffer, replay_rng, batch_size)
+
+    use_replay = jax.random.bernoulli(
+        mix_rng, p=replay_fraction, shape=(batch_size,)
     )
-    perm = jax.random.permutation(perm_rng, on_policy_count + replay_count)
-    combined = jax.tree.map(lambda x: x[perm], combined)
-    return swap_time_batch(combined)
+
+    def _mix(on, rep):
+        mask = use_replay.reshape((batch_size,) + (1,) * (on.ndim - 1))
+        return jnp.where(mask, rep, on)
+
+    mixed = jax.tree.map(_mix, on_policy, replay)
+    perm = jax.random.permutation(perm_rng, batch_size)
+    mixed = jax.tree.map(lambda x: x[perm], mixed)
+    return swap_time_batch(mixed)
 
 
 def summarize_returns_jax(returns: chex.Array, discounts: chex.Array) -> chex.Array:
@@ -274,12 +282,10 @@ def train(args: argparse.Namespace) -> None:
         raise RuntimeError("No JAX devices available.")
 
     replay_fraction = clamp_replay_fraction(args.replay_fraction)
-    on_policy_count = int(round((1.0 - replay_fraction) * args.batch_size))
-    if replay_fraction < 1.0 and on_policy_count == 0:
-        on_policy_count = 1
-    replay_count = args.batch_size - on_policy_count
-    if replay_count < 0:
-        raise ValueError("replay_fraction yields negative replay count.")
+    if args.batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    if args.updates_per_iter <= 0:
+        raise ValueError("updates_per_iter must be positive.")
 
     if args.buffer_capacity is None:
         buffer_capacity = int(
@@ -405,7 +411,7 @@ def train(args: argparse.Namespace) -> None:
             state.acc_rewards,
             state.total_steps,
         )
-        rng, rollout_rng, sample_rng, update_rng = jax.random.split(rng, 4)
+        rng, rollout_rng, update_rng = jax.random.split(rng, 3)
 
         actor_rollout, actor_state, ts, env_state = unroll_actor(
             learner_state.params, actor_state, ts, env_state, rollout_rng
@@ -418,19 +424,19 @@ def train(args: argparse.Namespace) -> None:
             (actor_rollout.rewards, actor_rollout.discounts),
         )
 
-        learner_rollout = sample_mixed_batch(
-            sample_rng,
-            rollout_bt,
-            buffer,
-            on_policy_count,
-            replay_count,
-        )
-
         update_rngs = jax.random.split(update_rng, args.updates_per_iter)
 
         def _update_step(learner_state, rng):
+            sample_rng, step_rng = jax.random.split(rng)
+            learner_rollout = sample_mixed_batch(
+                sample_rng,
+                rollout_bt,
+                buffer,
+                args.batch_size,
+                replay_fraction,
+            )
             learner_state, _, metrics = agent.learner_step(
-                rng,
+                step_rng,
                 learner_rollout,
                 learner_state,
                 actor_state,
@@ -495,7 +501,8 @@ def train(args: argparse.Namespace) -> None:
         return jax.lax.scan(train_step, state, xs=None, length=args.num_iterations)
 
     train_loop_jit = jax.jit(train_loop)
-    train_loop_jit(init_state)
+    final_state, _ = train_loop_jit(init_state)
+    jax.block_until_ready(final_state.total_steps)
 
 
 if __name__ == "__main__":
