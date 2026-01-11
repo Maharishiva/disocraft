@@ -180,6 +180,23 @@ def accumulate_rewards(acc_rewards, x):
 def swap_time_batch(rollout: types.ActorRollout) -> types.ActorRollout:
     return jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), rollout)
 
+def strip_rollout_for_replay(rollout: types.ActorRollout) -> types.ActorRollout:
+    """Keep only what Disco103 training needs from the behaviour policy.
+
+    Storing full `agent_outs` (in particular `q` with shape [A, num_bins]) makes
+    a 400k-transition buffer infeasible on GPU memory.
+    """
+    behaviour_logits = rollout.agent_outs["logits"]
+    return types.ActorRollout(
+        observations=rollout.observations,
+        actions=rollout.actions,
+        rewards=rollout.rewards,
+        discounts=rollout.discounts,
+        agent_outs={"logits": behaviour_logits},
+        states=rollout.states,
+        logits=rollout.logits,
+    )
+
 
 def init_replay_buffer(
     example_rollout: types.ActorRollout, capacity: int
@@ -288,11 +305,16 @@ def train(args: argparse.Namespace) -> None:
         raise ValueError("updates_per_iter must be positive.")
 
     if args.buffer_capacity is None:
-        buffer_capacity = int(
+        requested_capacity = int(
             math.ceil(args.buffer_capacity_transitions / args.rollout_len)
         )
     else:
-        buffer_capacity = int(args.buffer_capacity)
+        requested_capacity = int(args.buffer_capacity)
+    if requested_capacity <= 0:
+        raise ValueError("buffer_capacity must be positive.")
+
+    max_chunks_needed = args.num_envs * args.num_iterations
+    buffer_capacity = int(min(requested_capacity, max_chunks_needed))
     if buffer_capacity <= 0:
         raise ValueError("buffer_capacity must be positive.")
 
@@ -356,6 +378,7 @@ def train(args: argparse.Namespace) -> None:
             dummy_timestep,
         )
     )
+    dummy_rollout = strip_rollout_for_replay(dummy_rollout)
     buffer = init_replay_buffer(dummy_rollout, buffer_capacity)
     update_rule_params = disco_103_params
 
@@ -369,6 +392,7 @@ def train(args: argparse.Namespace) -> None:
         f"expected_replay={expected_replay:.2f} "
         f"updates_per_iter={args.updates_per_iter} "
         f"buffer_chunks={buffer_capacity} "
+        f"(requested={requested_capacity}) "
         f"buffer_transitions={buffer_transitions}"
     )
 
@@ -387,6 +411,7 @@ def train(args: argparse.Namespace) -> None:
             jax.random.split(rng, args.rollout_len),
         )
         actor_rollout = types.ActorRollout.from_timestep(actor_rollout)
+        actor_rollout = strip_rollout_for_replay(actor_rollout)
         return actor_rollout, actor_state, ts, env_state
 
     def _log_callback(args):
