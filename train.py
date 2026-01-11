@@ -211,7 +211,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replay_fraction", type=float, default=0.99)
     parser.add_argument("--buffer_capacity", type=int, default=400000)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
-    parser.add_argument("--weight_decay", type=float, default=0.3)
     parser.add_argument("--dense", type=str, default="512,512")
     parser.add_argument("--lstm_size", type=int, default=128)
     parser.add_argument("--seed", type=int, default=0)
@@ -263,7 +262,6 @@ def train(args: argparse.Namespace) -> None:
     dense = tuple(int(x) for x in args.dense.split(",") if x.strip())
     agent_settings = agent_lib.get_settings_disco()
     agent_settings.learning_rate = args.learning_rate
-    agent_settings.weight_decay = args.weight_decay
     agent_settings.net_settings.name = "mlp"
     agent_settings.net_settings.net_args = dict(
         dense=dense,
