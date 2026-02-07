@@ -279,6 +279,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=24)
     parser.add_argument("--updates_per_iter", type=int, default=1)
     parser.add_argument("--replay_fraction", type=float, default=0.99)
+    parser.add_argument("--min_buffer_size", type=int, default=None)
     parser.add_argument("--buffer_capacity", type=int, default=None)
     parser.add_argument("--buffer_capacity_transitions", type=int, default=400000)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
@@ -298,11 +299,17 @@ def train(args: argparse.Namespace) -> None:
     if not jax.devices():
         raise RuntimeError("No JAX devices available.")
 
+    if args.num_envs <= 0:
+        raise ValueError("num_envs must be positive.")
+    if args.rollout_len <= 0:
+        raise ValueError("rollout_len must be positive.")
     replay_fraction = clamp_replay_fraction(args.replay_fraction)
     if args.batch_size <= 0:
         raise ValueError("batch_size must be positive.")
     if args.updates_per_iter <= 0:
         raise ValueError("updates_per_iter must be positive.")
+    if args.min_buffer_size is not None and args.min_buffer_size <= 0:
+        raise ValueError("min_buffer_size must be positive when provided.")
 
     if args.buffer_capacity is None:
         requested_capacity = int(
@@ -317,6 +324,14 @@ def train(args: argparse.Namespace) -> None:
     buffer_capacity = int(min(requested_capacity, max_chunks_needed))
     if buffer_capacity <= 0:
         raise ValueError("buffer_capacity must be positive.")
+    min_buffer_size = (
+        int(args.min_buffer_size) if args.min_buffer_size is not None else args.batch_size
+    )
+    if min_buffer_size > buffer_capacity:
+        raise ValueError(
+            f"min_buffer_size ({min_buffer_size}) cannot exceed buffer_capacity "
+            f"({buffer_capacity})."
+        )
 
     steps_per_iter = args.num_envs * args.rollout_len
     dense = tuple(int(x) for x in args.dense.split(",") if x.strip())
@@ -391,6 +406,7 @@ def train(args: argparse.Namespace) -> None:
         f"expected_on_policy={expected_on_policy:.2f} "
         f"expected_replay={expected_replay:.2f} "
         f"updates_per_iter={args.updates_per_iter} "
+        f"min_buffer_size={min_buffer_size} "
         f"buffer_chunks={buffer_capacity} "
         f"(requested={requested_capacity}) "
         f"buffer_transitions={buffer_transitions}"
@@ -450,6 +466,7 @@ def train(args: argparse.Namespace) -> None:
         )
 
         update_rngs = jax.random.split(update_rng, args.updates_per_iter)
+        zero_metric = jnp.array(0.0, dtype=jnp.float32)
 
         def _update_step(learner_state, rng):
             sample_rng, step_rng = jax.random.split(rng)
@@ -460,26 +477,36 @@ def train(args: argparse.Namespace) -> None:
                 args.batch_size,
                 replay_fraction,
             )
+            learner_agent_state = learner_rollout.first_state(time_axis=0)
             learner_state, _, metrics = agent.learner_step(
                 step_rng,
                 learner_rollout,
                 learner_state,
-                actor_state,
+                learner_agent_state,
                 update_rule_params,
                 False,
             )
-            return learner_state, metrics
+            loss = metrics.get("total_loss", zero_metric)
+            grad_norm = metrics.get("global_gradient_norm", zero_metric)
+            return learner_state, (loss, grad_norm)
 
-        learner_state, metrics_stack = jax.lax.scan(
-            _update_step, learner_state, update_rngs
+        def _do_updates(ls):
+            new_ls, (losses, grad_norms) = jax.lax.scan(_update_step, ls, update_rngs)
+            return new_ls, (losses[-1], grad_norms[-1])
+
+        def _skip_updates(ls):
+            return ls, (zero_metric, zero_metric)
+
+        learner_state, (loss, grad_norm) = jax.lax.cond(
+            buffer.size >= min_buffer_size,
+            _do_updates,
+            _skip_updates,
+            learner_state,
         )
-        metrics = jax.tree.map(lambda x: x[-1], metrics_stack)
 
         total_steps = total_steps + steps_per_iter
         iter_idx = total_steps // steps_per_iter
         avg_return = summarize_returns_jax(returns, actor_rollout.discounts)
-        loss = metrics.get("total_loss", jnp.array(0.0))
-        grad_norm = metrics.get("global_gradient_norm", jnp.array(0.0))
 
         if enable_logging:
             do_log = iter_idx % log_every == 0
