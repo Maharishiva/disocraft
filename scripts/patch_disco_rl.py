@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Patch DiscoRL meta_nets for JAX tracer compatibility."""
+
 from __future__ import annotations
 
 from pathlib import Path

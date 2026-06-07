@@ -6,3 +6,5 @@
 __pycache__/
 runs/
 *.pyc
+run.log
+.ruff_cache/
