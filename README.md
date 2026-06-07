@@ -4,58 +4,49 @@ Train DiscoRL's Disco103 update rule on Craftax (symbolic, default).
 
 ## Local setup
 
-This repo expects Python 3.11+ because `disco_rl` requires it.
+Install `uv` first:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
+brew install uv
 ```
 
-Install JAX first (CPU or GPU, choose one):
-
-```bash
-# CPU only
-pip install -U "jax[cpu]"
-```
-
-Initialize submodules:
+This repo expects Python 3.11+ because `disco_rl` requires it. Initialize
+submodules, then let `uv` create and sync `.venv`:
 
 ```bash
 git submodule update --init --recursive
-```
-
-Then install the local clones + extra deps:
-
-```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 Apply the DiscoRL patch for JAX tracer compatibility:
 
 ```bash
-python scripts/patch_disco_rl.py
+uv run python scripts/patch_disco_rl.py
+```
+
+Format repo-owned Python files with Ruff:
+
+```bash
+uv run ruff format train.py trainer.py train_full.py train_pmap.py train_pmap_full.py scripts
 ```
 
 ## Training
 
 ```bash
-python train.py --num_iterations 1000 --num_envs 1
+uv run python train.py --checkpoint_dir runs/train_1b_fifo_256x4
 ```
 
-Common overrides:
+The default entrypoint is intentionally narrow: 2 local devices, symbolic
+Craftax, `global_envs=4`, `global_batch=256`, FIFO replay, 1B target env steps,
+and latest/final checkpoints.
 
 ```bash
-python train.py \
-  --env_name Craftax-Symbolic-v1 \
-  --num_envs 1 \
-  --rollout_len 32 \
-  --batch_size 64 \
-  --learning_rate 3e-4
+uv run python train.py --target_steps 1000000 --checkpoint_dir runs/smoke
 ```
 
 The Disco103 weights are loaded from `external/disco_rl` by default. Use
-`--weights_path` to point to a different copy if needed.
+`train_full.py` or `train_pmap_full.py` for the older configurable runners.
 
 Notes:
-- `--num_envs` is the number of vectorized Craftax environments on a single device.
+- `trainer.py` is the fixed pmap training core.
+- `train.py` is only the small CLI/status wrapper.
