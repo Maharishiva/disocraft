@@ -1,0 +1,1847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gradients of Gradients: How DiscoRL Learns Its Own Learning Rule</title>
+
+<!-- KaTeX -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body, {delimiters:[
+    {left:'$$', right:'$$', display:true},
+    {left:'\\(', right:'\\)', display:false}
+  ]});"></script>
+
+<!-- highlight.js -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script>window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+
+<style>
+  :root {
+    --ink: #1c1e26;
+    --muted: #6b7280;
+    --paper: #fdfcf9;
+    --card: #f4f1ea;
+    --agent: #3b5ba5;     /* Disco57 blue  : agent / theta  */
+    --meta:  #e8833a;     /* Disco103 orange: meta / eta    */
+    --grad:  #c0392b;     /* meta-gradient red              */
+    --data:  #2e7d32;     /* environment / data green       */
+    --line:  #d8d2c4;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 18px/1.65 "Charter", "Georgia", "Iowan Old Style", serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 0 24px 120px; }
+  h1, h2, h3, h4 { font-family: "Avenir Next", "Helvetica Neue", system-ui, sans-serif; line-height: 1.25; }
+  h1 { font-size: 2.5rem; margin: 0.4em 0 0.2em; letter-spacing: -0.5px; }
+  h2 { font-size: 1.7rem; margin-top: 2.4em; border-bottom: 2px solid var(--line); padding-bottom: 0.25em; }
+  h2 .secno { color: var(--meta); margin-right: 0.4em; font-weight: 700; }
+  h3 { font-size: 1.22rem; margin-top: 1.8em; }
+  .subtitle { font-family: "Avenir Next", system-ui, sans-serif; color: var(--muted); font-size: 1.18rem; margin-top: 0; }
+  .byline { color: var(--muted); font-family: system-ui, sans-serif; font-size: 0.9rem;
+            border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+            padding: 8px 0; margin: 22px 0 30px; }
+  a { color: var(--agent); }
+  hr { border: none; border-top: 1px solid var(--line); margin: 3em 0; }
+
+  .hero {
+    margin-top: 56px;
+  }
+  .pill { display:inline-block; font-family: system-ui, sans-serif; font-size: 0.72rem; font-weight: 700;
+          letter-spacing: 1.2px; text-transform: uppercase; color: #fff; background: var(--meta);
+          border-radius: 999px; padding: 3px 12px; }
+
+  .tldr, .box, .intuition, .warn {
+    border-radius: 10px; padding: 18px 22px; margin: 26px 0; font-size: 0.97em;
+  }
+  .tldr { background: var(--card); border-left: 5px solid var(--meta); }
+  .tldr p { margin: 0.55em 0; }
+  .box  { background: #eef2fa; border-left: 5px solid var(--agent); }
+  .intuition { background: #f0f7f0; border-left: 5px solid var(--data); }
+  .warn { background: #fbeeea; border-left: 5px solid var(--grad); }
+  .tldr b:first-child, .box b:first-child, .intuition b:first-child, .warn b:first-child {
+    font-family: system-ui, sans-serif; letter-spacing: 0.6px; font-size: 0.8em; text-transform: uppercase;
+  }
+
+  nav.toc { background: var(--card); border-radius: 10px; padding: 18px 26px; font-family: system-ui, sans-serif; font-size: 0.92rem; }
+  nav.toc ol { margin: 8px 0 4px; padding-left: 20px; }
+  nav.toc li { margin: 3px 0; }
+  nav.toc a { text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+
+  figure { margin: 36px 0; }
+  figure svg { width: 100%; height: auto; display: block; }
+  figcaption { font-family: system-ui, sans-serif; font-size: 0.85rem; color: var(--muted);
+               margin-top: 10px; line-height: 1.5; }
+  figcaption b { color: var(--ink); }
+
+  pre { background: #f6f8fa; border: 1px solid #e3e6ea; border-radius: 8px;
+        padding: 14px 18px; overflow-x: auto; font-size: 0.78em; line-height: 1.5; }
+  code { font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  p code, li code, td code { background: #efece4; border-radius: 4px; padding: 1px 5px; font-size: 0.85em; }
+  pre code { background: none; padding: 0; }
+  .term-output { background: #14161c; color: #d6e4d6; border: none; }
+  .term-output code { color: #d6e4d6; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.88em; margin: 24px 0;
+          font-family: system-ui, sans-serif; }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--card); font-weight: 600; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .footnote { font-size: 0.85em; color: var(--muted); }
+  .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
+
+  .legend { font-family: system-ui, sans-serif; font-size: 0.8rem; color: var(--muted); }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+</style>
+</head>
+
+<body>
+<main>
+
+<!-- ================================================================ -->
+<!-- HERO                                                             -->
+<!-- ================================================================ -->
+<div class="hero">
+  <span class="pill">Deep dive</span>
+  <h1>Gradients of Gradients</h1>
+  <p class="subtitle">How DeepMind's DiscoRL actually trains its meta-network — second-order
+  autodiff, KL targets, mixed-mode differentiation, and a 200-line toy you can run on a laptop.</p>
+  <div class="byline">
+    Fred &nbsp;·&nbsp; June 2026 &nbsp;·&nbsp; ~50 min read &nbsp;·&nbsp;
+    companion code: <code>blog/toy_discorl.py</code>
+  </div>
+</div>
+
+<div class="tldr">
+<p><b>TL;DR</b> — DiscoRL (Oh et&nbsp;al., <i>Nature</i> 648, 2025) meta-learns an RL update rule
+that beats MuZero on Atari and generalizes to unseen benchmarks. Most readers get the architecture;
+far fewer get the <em>training</em>. The meta-network is trained by <b>backpropagating through the
+agent's own gradient-descent updates</b>: the agent's parameter update is itself a differentiable
+function of the meta-parameters, so "how good the agent became" can be differentiated with respect
+to "the rule that taught it".</p>
+<p>That requires second-order derivatives (Hessian-vector and mixed-derivative products), which is
+what "gradients through gradients" means; it is made affordable at scale by <b>MixFlow-MG</b>, a
+mixed-mode (forward-over-reverse) autodiff trick that exploits the symmetry of second derivatives
+to cut memory by >10×. The rule outputs <b>targets matched with a KL divergence</b> rather than a
+scalar loss because targets-plus-distance is a strictly larger search space (it contains
+semi-gradient methods like Q-learning, which are not the gradient of any loss) and because KL on
+softmax-normalized vectors gives bounded, well-conditioned gradients that keep meta-optimization
+stable.</p>
+<p>This post derives all of it, walks the actual released code, and meta-trains a tiny discovered
+rule from scratch — which ends up beating tuned REINFORCE on its toy world.</p>
+</div>
+
+<nav class="toc">
+<b>Contents</b>
+<ol>
+  <li><a href="#sec1">Why this post</a></li>
+  <li><a href="#sec2">The cast, in five tensors</a></li>
+  <li><a href="#sec3">Two nested loops: discovery as bilevel optimization</a></li>
+  <li><a href="#sec4">"Gradients through gradients", from scratch</a></li>
+  <li><a href="#sec5">Why KL-to-targets, not a learned loss</a></li>
+  <li><a href="#sec6">The memory wall, and MixFlow-MG</a></li>
+  <li><a href="#sec7">A 200-line DiscoRL you can run</a></li>
+  <li><a href="#sec8">What the toy hides: the real system</a></li>
+  <li><a href="#sec9">Where I'd push next</a></li>
+  <li><a href="#sec10">References</a></li>
+</ol>
+</nav>
+
+<!-- ================================================================ -->
+<h2 id="sec1"><span class="secno">1</span>Why this post</h2>
+
+<p>I've spent the last while reproducing DiscoRL's <b>Disco103</b> rule on Craftax-Classic
+(pixels): load DeepMind's released meta-network weights, train a fresh agent with the discovered
+update rule, and watch it reach a ~12 episode return at around 12M environment steps — a
+Crafter-style score in the neighbourhood of the paper's Crafter results (Craftax is a separate
+reimplementation, so the numbers aren't directly comparable, but the rule plainly works on a world
+it never saw during discovery). That exercise convinces you the discovered rule is real.
+It does <em>not</em> tell you how the rule was discovered.</p>
+
+<p>The Nature paper compresses the entire meta-training machinery into one line:</p>
+
+$$
+J(\eta) = \mathbb{E}_{\mathcal{E}}\,\mathbb{E}_{\theta}\!\left[J(\theta)\right],
+\qquad
+\nabla_\eta J(\eta) \;\approx\; \mathbb{E}_{\mathcal{E}}\,\mathbb{E}_{\theta}\!\left[\,\nabla_\eta\theta\;\nabla_\theta J(\theta)\,\right]
+$$
+
+<p>That innocent \(\nabla_\eta \theta\) is doing a colossal amount of work. It hides an unrolled
+optimization process, second-order derivatives, a clever estimator for a term you can't
+backpropagate through, half a dozen stabilization tricks, and a memory problem severe enough that
+DeepMind wrote a separate ICML paper (MixFlow-MG) just to make it fit on TPUs. This post unpacks
+all of it, with the math, the JAX mechanics, and a minimal re-implementation that actually runs.</p>
+
+<p>Everything here is grounded in three primary sources: the Nature paper itself, the open-sourced
+<a href="https://github.com/google-deepmind/disco_rl"><code>disco_rl</code></a> repository (including
+the official <code>meta_train.ipynb</code> colab, which contains a simplified but real version of the
+outer loop), and the MixFlow-MG paper (Kemaev et&nbsp;al., ICML 2025).</p>
+
+<!-- ================================================================ -->
+<h2 id="sec2"><span class="secno">2</span>The cast, in five tensors</h2>
+
+<p>Quick recap to fix notation — skip ahead if the architecture is already burned into your
+retinas.</p>
+
+<p>The <b>agent</b>, parameterized by \(\theta\), looks at an observation and emits five things:</p>
+
+<figure>
+<svg viewBox="0 0 860 360" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <!-- env -->
+  <rect x="20" y="150" width="120" height="60" rx="10" fill="#e8f3e8" stroke="#2e7d32" stroke-width="1.5"/>
+  <text x="80" y="178" text-anchor="middle" font-size="15" fill="#2e7d32" font-weight="600">Environment</text>
+  <text x="80" y="196" text-anchor="middle" font-size="11" fill="#2e7d32">observation s</text>
+  <!-- torso -->
+  <rect x="210" y="140" width="150" height="80" rx="10" fill="#eef2fa" stroke="#3b5ba5" stroke-width="1.5"/>
+  <text x="285" y="172" text-anchor="middle" font-size="15" fill="#3b5ba5" font-weight="600">Agent net θ</text>
+  <text x="285" y="192" text-anchor="middle" font-size="11" fill="#3b5ba5">(any architecture)</text>
+  <line x1="140" y1="180" x2="205" y2="180" stroke="#2e7d32" stroke-width="1.5" marker-end="url(#arr-g)"/>
+  <!-- heads -->
+  <g font-size="13">
+    <rect x="450" y="20"  width="180" height="52" rx="8" fill="#fff" stroke="#3b5ba5" stroke-width="1.5"/>
+    <text x="540" y="42" text-anchor="middle" font-weight="700" fill="#3b5ba5">π(·|s)  policy</text>
+    <text x="540" y="60" text-anchor="middle" fill="#6b7280" font-size="11">what to do</text>
+
+    <rect x="450" y="86" width="180" height="52" rx="8" fill="#fdf1e7" stroke="#e8833a" stroke-width="2"/>
+    <text x="540" y="108" text-anchor="middle" font-weight="700" fill="#b35c17">y(s) ∈ ℝⁿ</text>
+    <text x="540" y="126" text-anchor="middle" fill="#b35c17" font-size="11">obs-conditioned prediction</text>
+
+    <rect x="450" y="152" width="180" height="52" rx="8" fill="#fdf1e7" stroke="#e8833a" stroke-width="2"/>
+    <text x="540" y="174" text-anchor="middle" font-weight="700" fill="#b35c17">z(s,a) ∈ ℝᵐ</text>
+    <text x="540" y="192" text-anchor="middle" fill="#b35c17" font-size="11">action-conditioned prediction</text>
+
+    <rect x="450" y="218" width="180" height="52" rx="8" fill="#fff" stroke="#3b5ba5" stroke-width="1.5"/>
+    <text x="540" y="240" text-anchor="middle" font-weight="700" fill="#3b5ba5">q(s,a)  action-value</text>
+    <text x="540" y="258" text-anchor="middle" fill="#6b7280" font-size="11">601-bin categorical, Retrace target</text>
+
+    <rect x="450" y="284" width="180" height="52" rx="8" fill="#fff" stroke="#3b5ba5" stroke-width="1.5"/>
+    <text x="540" y="306" text-anchor="middle" font-weight="700" fill="#3b5ba5">p(s,a)  aux policy pred.</text>
+    <text x="540" y="324" text-anchor="middle" fill="#6b7280" font-size="11">predicts π at next state</text>
+  </g>
+  <!-- fan-out lines -->
+  <g stroke="#9aa3b2" stroke-width="1.2" fill="none">
+    <path d="M360 165 C 400 140, 410 60, 446 46"/>
+    <path d="M360 172 C 400 160, 408 120, 446 112"/>
+    <path d="M360 180 L 446 178"/>
+    <path d="M360 188 C 400 200, 408 236, 446 244"/>
+    <path d="M360 195 C 400 220, 410 296, 446 310"/>
+  </g>
+  <!-- semantics labels -->
+  <g font-size="12">
+    <rect x="660" y="86" width="180" height="118" rx="8" fill="none" stroke="#e8833a" stroke-dasharray="5 4" stroke-width="1.5"/>
+    <text x="750" y="110" text-anchor="middle" fill="#b35c17" font-weight="700">semantics are</text>
+    <text x="750" y="127" text-anchor="middle" fill="#b35c17" font-weight="700">meta-learned</text>
+    <text x="750" y="150" text-anchor="middle" fill="#b35c17">the rule decides what</text>
+    <text x="750" y="166" text-anchor="middle" fill="#b35c17">these vectors mean</text>
+    <text x="750" y="182" text-anchor="middle" fill="#b35c17">(n = m = 600)</text>
+    <text x="720" y="46" text-anchor="middle" fill="#6b7280">pre-defined</text>
+    <text x="720" y="250" text-anchor="middle" fill="#6b7280">pre-defined</text>
+    <text x="720" y="316" text-anchor="middle" fill="#6b7280">pre-defined</text>
+  </g>
+  <defs>
+    <marker id="arr-g" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#2e7d32"/></marker>
+  </defs>
+</svg>
+<figcaption><b>Figure 1 — The agent's outputs.</b> Policy \(\pi\) plus two prediction vectors
+\(y(s)\in\mathbb{R}^{n}\) and \(z(s,a)\in\mathbb{R}^{m}\) (both 600-dimensional in Disco103) whose
+meaning is <em>not designed</em> — the discovery process decides what they should predict. The
+action-value \(q\) and one-step policy prediction \(p\) keep hand-designed semantics, anchoring the
+search and providing a baseline for variance reduction.</figcaption>
+</figure>
+
+<p>The <b>meta-network</b> — the thing that <em>is</em> the RL algorithm — is a function
+\(m_\eta\) that consumes a trajectory of the agent's outputs from time \(t\) to \(t+n\), plus
+rewards and termination flags, and emits <b>targets</b>:</p>
+
+$$
+m_\eta:\;
+\big(f_\theta(s_t),\,a_t,\,r_t,\,\dots,\,f_\theta(s_{t+n}),\,f_{\theta^-}(s_{t+n})\big)
+\;\longmapsto\;
+\big(\hat\pi_t,\,\hat y_t,\,\hat z_t\big)
+$$
+
+<p>where \(f_\theta = (\pi_\theta, y_\theta, z_\theta, q_\theta)\) and \(\theta^-\) is an
+exponential moving average of \(\theta\) (a target network). Architecturally it's surprisingly
+small: in the released Disco103 weights, the core is an LSTM with <b>256 hidden units that scans
+the trajectory backwards in time</b> (so information from the future flows into the targets of the
+present — that's how multi-step bootstrapping like TD(\(\lambda\)) becomes expressible), with tiny
+shared MLPs embedding \(y\) and \(z\), shared 1-D convolutions over the action axis (so the same
+rule works for any number of actions), and a second, slower "lifetime" LSTM of 128 units that takes
+one step per <em>agent update</em>, letting the rule adapt to where the agent is in its life.</p>
+
+<figure>
+<svg viewBox="0 0 860 430" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <!-- timeline -->
+  <g font-size="12" fill="#6b7280">
+    <text x="190" y="415" text-anchor="middle">t</text>
+    <text x="380" y="415" text-anchor="middle">t+1</text>
+    <text x="570" y="415" text-anchor="middle">t+2</text>
+    <text x="745" y="415" text-anchor="middle">… t+n</text>
+  </g>
+  <!-- agent outputs row -->
+  <g font-size="13">
+    <rect x="130" y="330" width="120" height="50" rx="8" fill="#eef2fa" stroke="#3b5ba5"/>
+    <text x="190" y="350" text-anchor="middle" fill="#3b5ba5" font-weight="600">π y z q</text>
+    <text x="190" y="368" text-anchor="middle" fill="#6b7280" font-size="11">r, termination</text>
+    <rect x="320" y="330" width="120" height="50" rx="8" fill="#eef2fa" stroke="#3b5ba5"/>
+    <text x="380" y="350" text-anchor="middle" fill="#3b5ba5" font-weight="600">π y z q</text>
+    <text x="380" y="368" text-anchor="middle" fill="#6b7280" font-size="11">r, termination</text>
+    <rect x="510" y="330" width="120" height="50" rx="8" fill="#eef2fa" stroke="#3b5ba5"/>
+    <text x="570" y="350" text-anchor="middle" fill="#3b5ba5" font-weight="600">π y z q</text>
+    <text x="570" y="368" text-anchor="middle" fill="#6b7280" font-size="11">r, termination</text>
+    <rect x="700" y="330" width="90" height="50" rx="8" fill="#eef2fa" stroke="#3b5ba5" stroke-dasharray="4 3"/>
+    <text x="745" y="358" text-anchor="middle" fill="#3b5ba5">…</text>
+  </g>
+  <!-- LSTM row -->
+  <g font-size="13">
+    <rect x="130" y="210" width="120" height="56" rx="8" fill="#fdf1e7" stroke="#e8833a" stroke-width="2"/>
+    <text x="190" y="243" text-anchor="middle" fill="#b35c17" font-weight="700">LSTM₂₅₆</text>
+    <rect x="320" y="210" width="120" height="56" rx="8" fill="#fdf1e7" stroke="#e8833a" stroke-width="2"/>
+    <text x="380" y="243" text-anchor="middle" fill="#b35c17" font-weight="700">LSTM₂₅₆</text>
+    <rect x="510" y="210" width="120" height="56" rx="8" fill="#fdf1e7" stroke="#e8833a" stroke-width="2"/>
+    <text x="570" y="243" text-anchor="middle" fill="#b35c17" font-weight="700">LSTM₂₅₆</text>
+    <rect x="700" y="210" width="90" height="56" rx="8" fill="#fdf1e7" stroke="#e8833a" stroke-width="2" stroke-dasharray="4 3"/>
+    <text x="745" y="243" text-anchor="middle" fill="#b35c17">…</text>
+  </g>
+  <!-- backward arrows between LSTM cells -->
+  <g stroke="#e8833a" stroke-width="2.5" fill="none">
+    <line x1="320" y1="238" x2="256" y2="238" marker-end="url(#arr-o)"/>
+    <line x1="510" y1="238" x2="446" y2="238" marker-end="url(#arr-o)"/>
+    <line x1="700" y1="238" x2="636" y2="238" marker-end="url(#arr-o)"/>
+  </g>
+  <text x="475" y="200" text-anchor="middle" font-size="12.5" fill="#b35c17" font-style="italic">hidden state flows backwards in time → future informs present targets</text>
+  <!-- up arrows inputs -->
+  <g stroke="#9aa3b2" stroke-width="1.5" fill="none">
+    <line x1="190" y1="330" x2="190" y2="270" marker-end="url(#arr-gr)"/>
+    <line x1="380" y1="330" x2="380" y2="270" marker-end="url(#arr-gr)"/>
+    <line x1="570" y1="330" x2="570" y2="270" marker-end="url(#arr-gr)"/>
+    <line x1="745" y1="330" x2="745" y2="270" marker-end="url(#arr-gr)"/>
+  </g>
+  <!-- targets row -->
+  <g font-size="14">
+    <rect x="130" y="90" width="120" height="50" rx="8" fill="#fff" stroke="#c0392b" stroke-width="1.8"/>
+    <text x="190" y="120" text-anchor="middle" fill="#c0392b" font-weight="700">π̂ₜ  ŷₜ  ẑₜ</text>
+    <rect x="320" y="90" width="120" height="50" rx="8" fill="#fff" stroke="#c0392b" stroke-width="1.8"/>
+    <text x="380" y="120" text-anchor="middle" fill="#c0392b" font-weight="700">π̂  ŷ  ẑ</text>
+    <rect x="510" y="90" width="120" height="50" rx="8" fill="#fff" stroke="#c0392b" stroke-width="1.8"/>
+    <text x="570" y="120" text-anchor="middle" fill="#c0392b" font-weight="700">π̂  ŷ  ẑ</text>
+  </g>
+  <g stroke="#c0392b" stroke-width="1.5" fill="none">
+    <line x1="190" y1="210" x2="190" y2="145" marker-end="url(#arr-r)"/>
+    <line x1="380" y1="210" x2="380" y2="145" marker-end="url(#arr-r)"/>
+    <line x1="570" y1="210" x2="570" y2="145" marker-end="url(#arr-r)"/>
+  </g>
+  <text x="190" y="75" text-anchor="middle" font-size="12.5" fill="#c0392b">targets: agent pulls π, y, z toward these (via KL)</text>
+  <!-- lifetime LSTM -->
+  <rect x="20" y="20" width="230" height="40" rx="8" fill="#fdf1e7" stroke="#e8833a" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="135" y="45" text-anchor="middle" font-size="12.5" fill="#b35c17" font-weight="600">lifetime meta-LSTM₁₂₈ (1 step / agent update)</text>
+  <path d="M250 40 C 420 40, 600 50, 700 200" stroke="#e8833a" stroke-width="1.2" stroke-dasharray="6 4" fill="none" marker-end="url(#arr-o)"/>
+  <text x="560" y="35" text-anchor="middle" font-size="11.5" fill="#b35c17">multiplicatively gates per-trajectory features</text>
+  <defs>
+    <marker id="arr-o" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#e8833a"/></marker>
+    <marker id="arr-r" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#c0392b"/></marker>
+    <marker id="arr-gr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#9aa3b2"/></marker>
+  </defs>
+</svg>
+<figcaption><b>Figure 2 — The meta-network is the algorithm.</b> A backwards LSTM over the
+trajectory turns "everything the agent currently believes, plus what just happened" into "what the
+agent should believe instead". Because the inputs at \(t+1,\dots,t+n\) include the agent's own
+<em>future predictions</em>, the rule can — and demonstrably does (paper, Fig.&nbsp;4d/e) — invent
+bootstrapping: building today's target out of tomorrow's prediction.</figcaption>
+</figure>
+
+<p>The agent is then trained, at every update, on the loss</p>
+
+$$
+L(\theta) = \mathbb{E}_{s,a\sim\pi_\theta}\Big[
+  D\big(\hat\pi,\,\pi_\theta(s)\big)
++ D\big(\hat y,\,y_\theta(s)\big)
++ D\big(\hat z,\,z_\theta(s,a)\big)
++ L_{\text{aux}}
+\Big],
+\qquad D = \mathrm{KL},
+$$
+
+<p>where every vector is pushed through a softmax before the KL, and
+\(L_{\text{aux}} = D(\hat q, q_\theta(s,a)) + D(\hat p, p_\theta(s,a))\) trains the two predefined
+heads (\(\hat q\) is a Retrace return projected to a two-hot categorical over 601 bins;
+\(\hat p\) is the policy at the next state). In the released code the weights are
+\(1.0\) for the \(\pi\)/\(y\)/\(z\)/\(p\) terms and \(0.2\) for the value term.</p>
+
+<p>So far, so familiar. Now the actual question: <em>where does \(\eta\) come from?</em></p>
+
+<!-- ================================================================ -->
+<h2 id="sec3"><span class="secno">3</span>Two nested loops: discovery as bilevel optimization</h2>
+
+<p>Discovery is a bilevel optimization problem. The <b>inner loop</b> is ordinary agent training,
+except the loss is dictated by \(\eta\):</p>
+
+$$
+\theta_{k+1} \;=\; \theta_k - \alpha\, U\!\big(\nabla_\theta L(\theta_k, \eta;\, \mathcal{D}_k)\big)
+\qquad k = 0,1,\dots
+$$
+
+<p>(\(U\) is the optimizer — Adam in the real system — and \(\mathcal{D}_k\) the \(k\)-th batch of
+trajectories, 90% of which come from replay.) The <b>outer loop</b> adjusts \(\eta\) to maximize
+how much reward agents trained this way collect over their lifetimes:</p>
+
+$$
+\max_\eta\; J(\eta) = \mathbb{E}_{\mathcal{E}\sim p(\mathcal{E})}\;\mathbb{E}_{\theta_0}
+\Big[\, J\big(\theta_K(\eta)\big) \Big],
+\qquad
+J(\theta) = \mathbb{E}_{\pi_\theta}\Big[\textstyle\sum_t \gamma^t r_t\Big].
+$$
+
+<figure>
+<svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <!-- big cycle -->
+  <ellipse cx="430" cy="200" rx="380" ry="170" fill="none" stroke="#d8d2c4" stroke-width="1"/>
+  <!-- population -->
+  <g>
+    <rect x="90" y="60" width="220" height="120" rx="12" fill="#eef2fa" stroke="#3b5ba5" stroke-width="1.5"/>
+    <rect x="100" y="70" width="220" height="120" rx="12" fill="#eef2fa" stroke="#3b5ba5" stroke-width="1.5"/>
+    <rect x="110" y="80" width="220" height="120" rx="12" fill="#eef2fa" stroke="#3b5ba5" stroke-width="2"/>
+    <text x="220" y="110" text-anchor="middle" font-size="14" fill="#3b5ba5" font-weight="700">population of agents</text>
+    <text x="220" y="132" text-anchor="middle" font-size="12" fill="#3b5ba5">θ⁽¹⁾ … θ⁽²⁰⁶⁾, one env each</text>
+    <text x="220" y="152" text-anchor="middle" font-size="12" fill="#3b5ba5">(Atari + ProcGen + DMLab-30)</text>
+    <text x="220" y="172" text-anchor="middle" font-size="12" fill="#6b7280">trained by the current rule η</text>
+  </g>
+  <!-- meta network -->
+  <rect x="560" y="80" width="220" height="110" rx="12" fill="#fdf1e7" stroke="#e8833a" stroke-width="2.5"/>
+  <text x="670" y="115" text-anchor="middle" font-size="15" fill="#b35c17" font-weight="700">meta-network η</text>
+  <text x="670" y="138" text-anchor="middle" font-size="12" fill="#b35c17">trajectory ↦ targets (π̂, ŷ, ẑ)</text>
+  <text x="670" y="158" text-anchor="middle" font-size="12" fill="#b35c17">= the RL algorithm</text>
+  <!-- arrows top -->
+  <path d="M340 110 C 420 80, 480 80, 555 110" stroke="#2e7d32" stroke-width="2" fill="none" marker-end="url(#arr2-g)"/>
+  <text x="448" y="78" text-anchor="middle" font-size="12" fill="#2e7d32">trajectories (predictions, rewards)</text>
+  <path d="M555 165 C 480 195, 420 195, 345 165" stroke="#c0392b" stroke-width="2" fill="none" marker-end="url(#arr2-r)"/>
+  <text x="450" y="208" text-anchor="middle" font-size="12" fill="#c0392b">targets → agent updates θₖ → θₖ₊₁</text>
+  <!-- meta optimization -->
+  <rect x="330" y="280" width="260" height="80" rx="12" fill="#fff" stroke="#c0392b" stroke-width="2"/>
+  <text x="460" y="310" text-anchor="middle" font-size="14" fill="#c0392b" font-weight="700">meta-optimization (∇∇)</text>
+  <text x="460" y="334" text-anchor="middle" font-size="13" fill="#c0392b">η ← η + ∇̂ηJ,  ∇ηJ = ∇ηθ · ∇θJ</text>
+  <path d="M220 205 C 230 280, 280 305, 325 315" stroke="#6b7280" stroke-width="1.5" fill="none" marker-end="url(#arr2-gr)"/>
+  <text x="225" y="278" text-anchor="middle" font-size="11.5" fill="#6b7280">lifetime returns J(θ)</text>
+  <path d="M595 315 C 660 305, 690 260, 685 195" stroke="#c0392b" stroke-width="2.5" fill="none" marker-end="url(#arr2-r)"/>
+  <text x="705" y="265" text-anchor="middle" font-size="11.5" fill="#c0392b">improved rule</text>
+  <defs>
+    <marker id="arr2-g" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#2e7d32"/></marker>
+    <marker id="arr2-r" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#c0392b"/></marker>
+    <marker id="arr2-gr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#6b7280"/></marker>
+  </defs>
+</svg>
+<figcaption><b>Figure 3 — The discovery loop.</b> Hundreds of agents live, learn (by the current
+rule) and die (they're periodically reset) in parallel across many environments. The meta-network
+is updated continuously from their experience — there is no "train an agent to completion, then
+score the rule" outer episode. Both loops run at once.</figcaption>
+</figure>
+
+<p>The crucial design decision: the outer loop is optimized by <b>gradient ascent</b>, not
+evolution. This is what lets DiscoRL search a space with millions of meta-parameters (a whole LSTM
+network) instead of the handful of hyperparameters or short symbolic programs that
+evolutionary approaches can handle. But it forces you to answer an uncomfortable question — what
+is the gradient of "the agent got better over its lifetime" with respect to "the weights of the
+network that produced its training targets"? By the chain rule:</p>
+
+$$
+\nabla_\eta J(\eta)
+\;\approx\;
+\mathbb{E}\Big[\;
+\underbrace{\nabla_\eta \theta_K}_{\substack{\text{how meta-params moved}\\\text{the agent's params}\\\text{(backprop through updates)}}}
+\;\cdot\;
+\underbrace{\nabla_\theta J(\theta_K)}_{\substack{\text{how agent params}\\\text{affect return}\\\text{(actor-critic estimate)}}}
+\;\Big]
+$$
+
+<p>The two factors have completely different characters, and the system computes them in completely
+different ways:</p>
+
+<ul>
+  <li>\(\nabla_\theta J(\theta)\) involves the environment, which you cannot backprop through. It is
+  <em>estimated</em>, with a standard policy-gradient estimator (more in §4.4).</li>
+  <li>\(\nabla_\eta \theta\) involves only the agent's update procedure — which is pure JAX code:
+  rollout in, loss, gradient, Adam, parameter delta out. It is computed <em>exactly</em>, by
+  backpropagating through that code. Including through the gradient computation inside it.</li>
+</ul>
+
+<p>That second bullet is the heart of everything. Let's slow way down.</p>
+
+<!-- ================================================================ -->
+<h2 id="sec4"><span class="secno">4</span>"Gradients through gradients", from scratch</h2>
+
+<h3 id="sec41">4.1 A one-dimensional toy you can do on paper</h3>
+
+<p>Strip everything away. One agent parameter \(\theta\) (a single number — think of it as the
+student's belief), one meta parameter \(\eta\) (also a single number — the teacher's knob). The
+"meta-network" just outputs \(\eta\) itself as the target, and the agent loss is half the squared
+distance between the student and the target:</p>
+
+$$
+L(\theta, \eta) = \tfrac12(\theta - \eta)^2 .
+$$
+
+<p>The agent starts from a fixed initialization \(\theta_0\) and takes <b>one</b> SGD step with
+learning rate \(\alpha\):</p>
+
+$$
+\theta_1 \;=\; \theta_0 - \alpha\,\frac{\partial L}{\partial \theta}(\theta_0,\eta).
+$$
+
+<p>After training, the "environment" pays off according to \(J(\theta) = -(\theta -
+\theta^\star)^2\): the closer the trained student lands to the sweet spot \(\theta^\star\), the
+better. The meta-question: <em>should the teacher raise or lower the target \(\eta\)?</em> The
+answer is the sign of the meta-gradient \(dJ/d\eta\) — so let's compute it with <b>no skipped
+steps</b>.</p>
+
+<h4>Step 0 — who depends on whom</h4>
+
+<p>Before touching any derivative, draw the dependency structure; every calculus mistake in
+meta-learning is really a dependency mistake. The quantities are:
+\(\eta\) (the free knob we'll differentiate with respect to);
+\(\theta_0\) (a <em>constant</em> — the initialization was chosen before the teacher had any say, so
+it does not move when \(\eta\) moves);
+\(\theta_1\) (depends on \(\eta\), through the update); and
+\(J(\theta_1)\) (depends on \(\eta\) only through \(\theta_1\)).</p>
+
+<figure>
+<svg viewBox="0 0 860 230" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <g font-size="14">
+    <rect x="30" y="40" width="90" height="46" rx="9" fill="#fdf1e7" stroke="#e8833a" stroke-width="2"/>
+    <text x="75" y="63" text-anchor="middle" fill="#b35c17" font-weight="700">η</text>
+    <text x="75" y="79" text-anchor="middle" font-size="10.5" fill="#b35c17">the knob</text>
+
+    <rect x="30" y="150" width="130" height="46" rx="9" fill="#f1f1f1" stroke="#6b7280" stroke-width="1.5"/>
+    <text x="95" y="173" text-anchor="middle" fill="#444" font-weight="700">θ₀</text>
+    <text x="95" y="189" text-anchor="middle" font-size="10.5" fill="#6b7280">fixed init (constant)</text>
+
+    <rect x="260" y="85" width="210" height="56" rx="9" fill="#fff" stroke="#1c1e26" stroke-width="1.5"/>
+    <text x="365" y="108" text-anchor="middle" font-weight="700">g(θ₀, η) = ∂L/∂θ (θ₀, η)</text>
+    <text x="365" y="126" text-anchor="middle" font-size="11" fill="#6b7280">the slope the student feels</text>
+
+    <rect x="555" y="85" width="130" height="56" rx="9" fill="#eef2fa" stroke="#3b5ba5" stroke-width="2"/>
+    <text x="620" y="108" text-anchor="middle" fill="#3b5ba5" font-weight="700">θ₁ = θ₀ − α·g</text>
+    <text x="620" y="126" text-anchor="middle" font-size="11" fill="#3b5ba5">where the student lands</text>
+
+    <rect x="740" y="85" width="100" height="56" rx="9" fill="#e8f3e8" stroke="#2e7d32" stroke-width="2"/>
+    <text x="790" y="108" text-anchor="middle" fill="#2e7d32" font-weight="700">J(θ₁)</text>
+    <text x="790" y="126" text-anchor="middle" font-size="11" fill="#2e7d32">reward</text>
+  </g>
+  <g stroke="#9aa3b2" stroke-width="1.6" fill="none">
+    <path d="M120 70 C 180 80, 210 95, 255 105" marker-end="url(#arr4a)"/>
+    <path d="M160 165 C 200 155, 220 140, 255 125" marker-end="url(#arr4a)"/>
+    <path d="M160 185 C 380 215, 520 175, 590 145" marker-end="url(#arr4a)"/>
+    <line x1="470" y1="113" x2="550" y2="113" marker-end="url(#arr4a)"/>
+    <line x1="685" y1="113" x2="735" y2="113" marker-end="url(#arr4a)"/>
+  </g>
+  <text x="510" y="105" text-anchor="middle" font-size="11" fill="#6b7280">× (−α)</text>
+  <text x="345" y="208" text-anchor="middle" font-size="11" fill="#6b7280">θ₀ also enters θ₁ directly (the "you keep your old position" term)</text>
+  <g stroke="#c0392b" stroke-width="2.4" fill="none" stroke-dasharray="6 4">
+    <path d="M105 88 C 170 105, 210 112, 256 119" marker-end="url(#arr4a-r)"/>
+    <path d="M470 127 C 500 130, 520 130, 551 127" marker-end="url(#arr4a-r)"/>
+    <path d="M685 127 C 705 130, 715 130, 736 127" marker-end="url(#arr4a-r)"/>
+  </g>
+  <text x="250" y="32" text-anchor="start" font-size="12.5" fill="#c0392b" font-weight="600">the meta-gradient dJ/dη follows the red path: η → g → θ₁ → J  (the ONLY path from η to J)</text>
+  <defs>
+    <marker id="arr4a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#9aa3b2"/></marker>
+    <marker id="arr4a-r" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#c0392b"/></marker>
+  </defs>
+</svg>
+<figcaption><b>Figure 4a — Dependency graph of the one-step toy.</b> \(\eta\) can only reach the
+reward by changing the slope \(g\), which changes where the student lands, which changes the
+payoff. Differentiation is bookkeeping over these arrows: multiply derivatives along each path,
+add the paths up. Here there is exactly one path from \(\eta\) to \(J\).</figcaption>
+</figure>
+
+<div class="box">
+<b>The toolbox</b> — the five facts of calculus this whole post runs on:
+<ol style="margin: 10px 0 4px;">
+<li><b>Constant rule.</b> If \(c\) does not depend on \(\eta\), then \(\frac{dc}{d\eta}=0\).</li>
+<li><b>Linearity.</b> \(\frac{d}{d\eta}\big(u + c\,v\big) = \frac{du}{d\eta} + c\,\frac{dv}{d\eta}\)
+— derivatives pass through sums, and multiplicative constants slide out front.</li>
+<li><b>Chain rule.</b> For a composition \(J\big(\theta_1(\eta)\big)\):
+\(\;\frac{dJ}{d\eta} = J'\big(\theta_1\big)\cdot\frac{d\theta_1}{d\eta}\)
+— derivative of the outer function, <em>evaluated at the inner value</em>, times derivative of the
+inner function. (The prime means "derivative of \(J\) with respect to its only argument":
+\(J'(\theta) \equiv \frac{dJ}{d\theta}\).)</li>
+<li><b>Partial vs. total.</b> \(\frac{\partial}{\partial\theta}\) means "wiggle \(\theta\) while
+holding every other symbol frozen". \(\frac{d}{d\eta}\) means "wiggle \(\eta\) and follow
+<em>every</em> arrow in the dependency graph through which \(\eta\) sneaks in". For a function with
+two slots, \(g(\theta, \eta)\), where the first slot may itself depend on \(\eta\), the total
+derivative adds one term per slot (this is the multivariable chain rule):
+$$\frac{d}{d\eta}\,g\big(\theta(\eta),\,\eta\big)
+= \underbrace{\frac{\partial g}{\partial \theta}\cdot\frac{d\theta}{d\eta}}_{\text{path through slot 1}}
+\;+\; \underbrace{\frac{\partial g}{\partial \eta}\cdot 1}_{\text{path through slot 2}}$$</li>
+<li><b>A derivative is just another function.</b> \(g(\theta,\eta) := \frac{\partial L}{\partial
+\theta}(\theta,\eta)\) is an ordinary function of two variables, and nothing stops us from
+differentiating it <em>again</em>. Doing so produces second derivatives. Notation:
+\(\frac{\partial^2 L}{\partial\eta\,\partial\theta}\) means
+\(\frac{\partial}{\partial\eta}\Big(\frac{\partial L}{\partial\theta}\Big)\) —
+<em>read the denominator right-to-left</em>: the \(\theta\)-derivative was taken first, then the
+\(\eta\)-derivative. (For any smooth \(L\), Schwarz's theorem says the order doesn't matter:
+\(\frac{\partial^2 L}{\partial\eta\,\partial\theta} = \frac{\partial^2 L}{\partial\theta\,\partial\eta}\).
+File that away — it becomes the punchline of §6.)</li>
+</ol>
+</div>
+
+<h4>Step 1 — compute the inner gradient (the slope the student feels)</h4>
+
+$$
+g(\theta, \eta) \;:=\; \frac{\partial L}{\partial \theta}
+\;=\; \frac{\partial}{\partial\theta}\,\tfrac12(\theta-\eta)^2
+\;=\; (\theta - \eta)\cdot\underbrace{\frac{\partial(\theta-\eta)}{\partial\theta}}_{=\;1}
+\;=\; \theta - \eta .
+$$
+
+<p>(Chain rule on the square; \(\eta\) stays frozen because this is a <em>partial</em> derivative
+in \(\theta\).) While we're here, note for later how this slope reacts to the target:</p>
+
+$$
+\frac{\partial^2 L}{\partial\eta\,\partial\theta}
+\;=\; \frac{\partial g}{\partial \eta}
+\;=\; \frac{\partial}{\partial\eta}\,(\theta - \eta) \;=\; -1 .
+$$
+
+<p>In words: raising the target by \(\varepsilon\) lowers the slope by \(\varepsilon\). That is the
+teacher's <em>entire</em> mechanism of influence — the only way \(\eta\) touches the student is by
+tilting the loss surface the student slides down.</p>
+
+<h4>Step 2 — write the update as an explicit function of \(\eta\)</h4>
+
+$$
+\theta_1(\eta) \;=\; \theta_0 - \alpha\, g(\theta_0, \eta) \;=\; \theta_0 - \alpha(\theta_0 - \eta).
+$$
+
+<h4>Step 3 — differentiate the update (two routes, same answer)</h4>
+
+<p><b>Route A: substitute first, then differentiate.</b> In this toy we have \(\theta_1\) in
+closed form, so just take \(\frac{d}{d\eta}\) term by term:</p>
+
+$$
+\frac{d\theta_1}{d\eta}
+= \underbrace{\frac{d\theta_0}{d\eta}}_{=\,0\ \text{(constant rule)}}
+-\;\alpha\,\underbrace{\frac{d(\theta_0-\eta)}{d\eta}}_{=\,0\,-\,1\ \text{(linearity)}}
+=\; 0 - \alpha\cdot(-1) \;=\; \alpha .
+$$
+
+<p>Done: \(\frac{d\theta_1}{d\eta} = \alpha\). Raise the target by \(\varepsilon\) and the student
+lands higher by \(\alpha\,\varepsilon\). Which makes sense: one SGD step moves the student a
+fraction \(\alpha\) of the way toward the target.</p>
+
+<p><b>Route B: differentiate the update rule symbolically, without substituting.</b> This is the
+route that matters, because in the real system \(L\) is a deep network's loss and you never get a
+closed form. Keep \(g\) abstract and apply the toolbox rules one at a time:</p>
+
+$$
+\frac{d\theta_1}{d\eta}
+= \frac{d}{d\eta}\Big[\theta_0 - \alpha\, g(\theta_0, \eta)\Big]
+= \underbrace{\frac{d\theta_0}{d\eta}}_{=\,0}
+-\;\alpha\,\frac{d}{d\eta}\,g(\theta_0, \eta)
+\qquad\text{(linearity + constant rule)}
+$$
+
+<p>Now the key move. \(g\) has two slots, so toolbox rule 4 (total derivative) gives one term per
+slot:</p>
+
+$$
+\frac{d}{d\eta}\,g(\theta_0, \eta)
+= \underbrace{\frac{\partial g}{\partial\theta}\cdot\frac{d\theta_0}{d\eta}}_{=\;\frac{\partial g}{\partial\theta}\,\cdot\, 0\;=\;0}
++\;
+\underbrace{\frac{\partial g}{\partial\eta}\cdot\frac{d\eta}{d\eta}}_{=\;\frac{\partial g}{\partial\eta}\,\cdot\, 1}
+=\; \frac{\partial g}{\partial \eta}
+\;=\; \frac{\partial^2 L}{\partial\eta\,\partial\theta}\bigg|_{(\theta_0,\,\eta)} .
+$$
+
+<p>The first slot contributes nothing <em>only because</em> \(\theta_0\) is the initialization —
+after one more inner step that slot comes alive (Step 6). The vertical bar means "evaluated at the
+point \((\theta_0, \eta)\)": a second derivative is still a function, so you must say where you are
+reading it off. Putting Route B together:</p>
+
+$$
+\boxed{\;
+\frac{d\theta_1}{d\eta} \;=\; -\,\alpha\;\frac{\partial^2 L}{\partial\eta\,\partial\theta}\bigg|_{(\theta_0,\,\eta)}
+\;}
+\qquad\text{for our } L:\;\; -\alpha\cdot(-1) = \alpha\;\;\checkmark\ \text{(matches Route A)}
+$$
+
+<p>Look at what just happened. The update <em>contains a first derivative</em>
+(\(g = \partial L/\partial\theta\)). Differentiating the update therefore <em>manufactures a second
+derivative</em> — the mixed one, \(\partial^2 L/\partial\eta\,\partial\theta\): "how does moving
+the teacher's knob change the slope the student feels". No mysticism. "Gradient through gradients"
+is the literal, mechanical consequence of applying \(\frac{d}{d\eta}\) to a formula that already
+has a \(\frac{\partial}{\partial\theta}\) inside it.</p>
+
+<h4>Step 4 — chain rule up to the reward</h4>
+
+<p>\(J(\theta) = -(\theta-\theta^\star)^2\), so \(J'(\theta) = -2(\theta - \theta^\star)\) (chain
+rule on the square again; \(\theta^\star\) is a constant). Toolbox rule 3 on the composition
+\(J\big(\theta_1(\eta)\big)\):</p>
+
+$$
+\frac{dJ}{d\eta}
+\;=\; J'(\theta_1)\cdot \frac{d\theta_1}{d\eta}
+\;=\; \underbrace{-2(\theta_1 - \theta^\star)}_{\substack{\text{how the reward reacts}\\\text{to the landing spot}}}
+\;\cdot\;
+\underbrace{\Big(\!-\alpha\,\frac{\partial^2 L}{\partial\eta\,\partial\theta}\Big)}_{\substack{\text{how the knob moves}\\\text{the landing spot}\;=\;\alpha}}
+\;=\; -2(\theta_1-\theta^\star)\,\alpha .
+$$
+
+<h4>Step 5 — numbers, and a no-calculus sanity check</h4>
+
+<p>Take \(\theta_0=0\), \(\eta=1\), \(\alpha=0.3\), \(\theta^\star=2\). Then the slope is
+\(g(\theta_0,\eta) = 0 - 1 = -1\), the student lands at \(\theta_1 = 0 - 0.3\cdot(-1) = 0.3\),
+and</p>
+
+$$
+\frac{dJ}{d\eta} = -2\,(0.3 - 2)\cdot 0.3 = (3.4)(0.3) = +1.02
+\quad\Longrightarrow\quad \text{positive — raise the target.}
+$$
+
+<p>If you don't fully trust the symbol-pushing, do what a derivative <em>is</em>: bump the knob and
+watch what happens. A derivative is nothing but the last column of this table in the limit of an
+infinitely small bump:</p>
+
+<table>
+<tr><th>teacher's knob \(\eta\)</th><th>student lands at \(\theta_1 = 0.7\,\theta_0 + 0.3\,\eta\)</th><th>reward \(J(\theta_1)\)</th><th>\(\Delta J / \Delta\eta\)</th></tr>
+<tr><td class="num">1.000</td><td class="num">0.3000</td><td class="num">−2.890000</td><td class="num">—</td></tr>
+<tr><td class="num">1.010</td><td class="num">0.3030</td><td class="num">−2.879809</td><td class="num">1.0191</td></tr>
+<tr><td class="num">1.001</td><td class="num">0.3003</td><td class="num">−2.888980</td><td class="num">1.0199</td></tr>
+<tr><td class="num">limit of tiny bumps</td><td></td><td></td><td class="num"><b>1.02</b> ✓</td></tr>
+</table>
+
+<p>(The finite-difference value isn't exactly 1.02 at a finite bump size because \(J\) is curved;
+it converges to 1.02 as the bump shrinks. Autodiff computes that limit exactly, in one pass,
+without ever bumping anything.)</p>
+
+<h4>Step 6 — take one more inner step, and watch the Hessian get born</h4>
+
+<p>Everything above had a simplification hiding in it: \(\theta_0\) was a constant, so the
+"path through slot 1" died at birth. Take a <em>second</em> SGD step and it wakes up:</p>
+
+$$
+\theta_2 = \theta_1 - \alpha\, g(\theta_1, \eta),
+\qquad\text{where now } \theta_1 = \theta_1(\eta)\ \text{moves with } \eta .
+$$
+
+<p>Differentiate with toolbox rule 4 — this time <em>both</em> slots of \(g\) are alive:</p>
+
+$$
+\frac{d\theta_2}{d\eta}
+= \frac{d\theta_1}{d\eta}
+- \alpha\Bigg[
+\underbrace{\frac{\partial g}{\partial\theta}\bigg|_{\theta_1}\!\cdot\frac{d\theta_1}{d\eta}}_{\substack{\text{slot 1: }\eta\text{ already moved }\theta_1,\\\text{which changes the slope}}}
++ \underbrace{\frac{\partial g}{\partial\eta}\bigg|_{\theta_1}}_{\substack{\text{slot 2: }\eta\text{ tilts}\\\text{the loss directly}}}
+\Bigg]
+$$
+
+<p>and since \(\frac{\partial g}{\partial \theta} = \frac{\partial^2 L}{\partial\theta^2}\) — the
+<b>Hessian</b>, the curvature of the loss in \(\theta\) — this rearranges to</p>
+
+$$
+\frac{d\theta_2}{d\eta}
+= \Big(1 - \alpha\,\frac{\partial^2 L}{\partial\theta^2}\Big)\,\frac{d\theta_1}{d\eta}
+\;-\; \alpha\,\frac{\partial^2 L}{\partial\eta\,\partial\theta}\bigg|_{\theta_1} .
+$$
+
+<p>For our \(L\): \(\partial^2 L/\partial\theta^2 = \partial(\theta-\eta)/\partial\theta = 1\), so
+\(\frac{d\theta_2}{d\eta} = (1-0.3)(0.3) + 0.3 = 0.51\). The structure is the point:</p>
+
+<div class="intuition">
+<b>The shape of every meta-gradient</b> —
+(decay factor from curvature) × (sensitivity inherited from previous steps) + (fresh injection
+from this step's targets). Iterate it \(N\) times and you get <em>exactly</em> the recursion of
+§4.2, with the scalars promoted to matrices: the curvature \(\partial^2 L/\partial\theta^2\)
+becomes the Hessian matrix \(H_k\), the mixed derivative becomes the matrix \(C_k\), and \(1\)
+becomes the identity \(I\). If Step 6 makes sense, §4.2 contains no new ideas.
+</div>
+
+<p>Three things to notice in the rear-view mirror, because they all survive to the full system:</p>
+
+<ol>
+<li>The meta-gradient flowed <em>through the inner gradient</em>: the derivative
+\(d\theta_1/d\eta\) required \(\partial^2 L/\partial\eta\,\partial\theta\) — a <b>mixed second
+derivative</b>. The phrase "gradient through gradients" means exactly this: the inner update <em>is</em>
+a gradient, and we are differentiating it.</li>
+<li>The meta-gradient is the product of "where the student ended up relative to where reward lives"
+(\(J'\)) and "how the teacher's knob moves the student" (\(d\theta_1/d\eta\)). The teacher learns
+from where its students land.</li>
+<li>Nothing required \(\eta\) to be a "good target" in any pre-defined sense. If hitting
+\(\theta^\star\) required the target to be a systematically <em>biased</em> lie, gradient ascent on
+\(\eta\) would happily learn to lie. This is why discovered targets can have semantics that no
+human would design.</li>
+</ol>
+
+<h3 id="sec42">4.2 The general recursion: unrolling the inner loop</h3>
+
+<p>Now do it properly. With SGD as the inner optimizer (Adam adds bookkeeping but no new ideas —
+we'll come back to it), the update at inner step \(k\) is</p>
+
+$$
+\theta_{k+1} = \theta_k - \alpha\, g_k,
+\qquad g_k = \nabla_\theta L(\theta_k, \eta;\,\mathcal{D}_k).
+$$
+
+<p>Differentiate both sides with respect to \(\eta\) — remembering that \(g_k\) depends on \(\eta\)
+both explicitly (the targets) and implicitly (through \(\theta_k\), which earlier updates shaped):</p>
+
+$$
+\frac{d\theta_{k+1}}{d\eta}
+= \big(I - \alpha H_k\big)\,\frac{d\theta_k}{d\eta} \;-\; \alpha\, C_k,
+\qquad
+H_k = \frac{\partial^2 L}{\partial\theta\,\partial\theta^{\!\top}}\bigg|_{\theta_k},
+\quad
+C_k = \frac{\partial^2 L}{\partial\eta\,\partial\theta}\bigg|_{\theta_k}.
+$$
+
+<p>This is Step 6 of §4.1, with the scalars promoted: \(H_k\) is the <b>Hessian matrix</b> of the
+inner loss (entry \((i,j)\) is \(\partial^2 L/\partial\theta_i\,\partial\theta_j\) — the curvature),
+and \(C_k\) is the <b>Jacobian of the inner gradient with respect to the meta-parameters</b>
+(shape \(|\theta|\times|\eta|\); entry \((i,j)\) is \(\partial^2 L/\partial\eta_j\,\partial\theta_i\)
+— how meta-knob \(j\) tilts the slope felt by agent-parameter \(i\)). Also
+\(d\theta_{k+1}/d\eta\) is itself a \(|\theta|\times|\eta|\) matrix: row \(i\), column \(j\) answers
+"how much does agent parameter \(i\) at step \(k{+}1\) move if meta parameter \(j\) is wiggled".</p>
+
+<p>Unroll the recursion from \(d\theta_0/d\eta = 0\) (the initialization owes nothing to the
+teacher) and plug into the chain rule, and the meta-gradient becomes a sum over inner steps:</p>
+
+$$
+\nabla_\eta J
+= -\alpha \sum_{k=0}^{N-1}
+C_k^{\!\top}
+\underbrace{\Big[\textstyle\prod_{j=k+1}^{N-1}\!\big(I-\alpha H_j\big)\Big]^{\!\top}\nabla_\theta J(\theta_N)}_{\displaystyle v_{k+1}}
+$$
+
+<p>Read it right to left, the way backprop computes it. \(\nabla_\theta J(\theta_N)\) says "in which
+direction should the <em>final</em> parameters have moved to earn more reward". Each factor
+\((I-\alpha H_j)^{\!\top}\) pulls that desire one update earlier — the Hessian term accounts for the
+fact that changing \(\theta_j\) changes the gradient the agent took at step \(j\). And each
+\(C_k^{\!\top}\) finally converts "the parameters at step \(k\) should have moved differently" into
+"the <em>targets</em> at step \(k\) should have been different" — which is a statement about \(\eta\).
+Summed over the window, the meta-network gets one consolidated lesson per meta-step: <em>here is how
+you should have taught differently</em>.</p>
+
+<div class="intuition">
+<b>Intuition</b> — The meta-gradient is exactly the credit-assignment question every teacher asks:
+"given where my student ended up, how should I have phrased my corrections along the way?" The
+Hessian factors are the annoying-but-essential part: they model how each correction changed the
+student's <em>subsequent reaction to corrections</em>, not just the student's state.
+</div>
+
+<figure>
+<svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <!-- theta chain -->
+  <g font-size="15" font-weight="700">
+    <circle cx="90"  cy="120" r="30" fill="#eef2fa" stroke="#3b5ba5" stroke-width="2"/><text x="90"  y="126" text-anchor="middle" fill="#3b5ba5">θ₀</text>
+    <circle cx="260" cy="120" r="30" fill="#eef2fa" stroke="#3b5ba5" stroke-width="2"/><text x="260" y="126" text-anchor="middle" fill="#3b5ba5">θ₁</text>
+    <circle cx="430" cy="120" r="30" fill="#eef2fa" stroke="#3b5ba5" stroke-width="2"/><text x="430" y="126" text-anchor="middle" fill="#3b5ba5">θ₂</text>
+    <text x="540" y="126" text-anchor="middle" fill="#6b7280">…</text>
+    <circle cx="650" cy="120" r="30" fill="#eef2fa" stroke="#3b5ba5" stroke-width="2"/><text x="650" y="126" text-anchor="middle" fill="#3b5ba5">θₙ</text>
+    <rect x="740" y="92" width="100" height="56" rx="10" fill="#e8f3e8" stroke="#2e7d32" stroke-width="2"/>
+    <text x="790" y="118" text-anchor="middle" font-size="14" fill="#2e7d32">J(θₙ)</text>
+    <text x="790" y="136" text-anchor="middle" font-size="10.5" fill="#2e7d32" font-weight="400">return estimate</text>
+  </g>
+  <!-- forward arrows with update labels -->
+  <g stroke="#3b5ba5" stroke-width="2" fill="none">
+    <line x1="120" y1="120" x2="225" y2="120" marker-end="url(#arr3-b)"/>
+    <line x1="290" y1="120" x2="395" y2="120" marker-end="url(#arr3-b)"/>
+    <line x1="460" y1="120" x2="515" y2="120" marker-end="url(#arr3-b)"/>
+    <line x1="565" y1="120" x2="615" y2="120" marker-end="url(#arr3-b)"/>
+    <line x1="680" y1="120" x2="735" y2="120" marker-end="url(#arr3-b)"/>
+  </g>
+  <g font-size="11" fill="#3b5ba5">
+    <text x="172" y="108" text-anchor="middle">−α∇θL(θ₀,η)</text>
+    <text x="342" y="108" text-anchor="middle">−α∇θL(θ₁,η)</text>
+  </g>
+  <!-- eta feeding each update -->
+  <rect x="330" y="20" width="200" height="40" rx="10" fill="#fdf1e7" stroke="#e8833a" stroke-width="2"/>
+  <text x="430" y="45" text-anchor="middle" font-size="14" fill="#b35c17" font-weight="700">meta-params η</text>
+  <g stroke="#e8833a" stroke-width="1.5" fill="none" stroke-dasharray="5 3">
+    <path d="M345 60 C 250 70, 190 85, 172 110" marker-end="url(#arr3-o)"/>
+    <path d="M400 60 C 370 80, 350 95, 342 108" marker-end="url(#arr3-o)"/>
+    <path d="M460 60 C 490 80, 520 100, 545 112" marker-end="url(#arr3-o)"/>
+    <path d="M520 55 C 600 75, 660 95, 700 112" marker-end="url(#arr3-o)"/>
+  </g>
+  <!-- backward meta-grad arrows -->
+  <g stroke="#c0392b" stroke-width="2.2" fill="none">
+    <path d="M760 150 C 720 185, 690 190, 668 165" marker-end="url(#arr3-r)"/>
+    <path d="M620 160 C 560 200, 500 200, 455 162" marker-end="url(#arr3-r)"/>
+    <path d="M400 162 C 360 200, 320 200, 285 162" marker-end="url(#arr3-r)"/>
+    <path d="M230 162 C 190 200, 150 200, 115 162" marker-end="url(#arr3-r)"/>
+  </g>
+  <text x="445" y="225" text-anchor="middle" font-size="13" fill="#c0392b" font-weight="600">
+    reverse pass:  vₖ = (I − αHₖ)ᵀ vₖ₊₁ ,   accumulate  −α Cₖᵀ vₖ₊₁  into ∇ηJ
+  </text>
+  <!-- window bracket -->
+  <path d="M60 255 L60 268 L840 268 L840 255" stroke="#6b7280" stroke-width="1.5" fill="none"/>
+  <text x="450" y="290" text-anchor="middle" font-size="12" fill="#6b7280">sliding window: backprop truncated to 20 agent updates (real system)</text>
+  <defs>
+    <marker id="arr3-b" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#3b5ba5"/></marker>
+    <marker id="arr3-o" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#e8833a"/></marker>
+    <marker id="arr3-r" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#c0392b"/></marker>
+  </defs>
+</svg>
+<figcaption><b>Figure 4 — Backprop through the update procedure</b> (the paper's Fig.&nbsp;1d,
+with the math filled in). Every blue arrow is one full agent update — rollout, meta-net forward,
+loss, gradient, optimizer. \(\eta\) feeds every update (orange). The red reverse pass carries the
+cotangent \(v_k = dJ/d\theta_k\) backwards through the chain, depositing a contribution into
+\(\nabla_\eta J\) at every step it passes.</figcaption>
+</figure>
+
+<h3 id="sec43">4.3 What this looks like inside JAX</h3>
+
+<p>Here's the thing that makes JAX (and the whole project) feel like magic: <em>you don't write any
+of the above</em>. You write the inner loop as plain code and call <code>jax.grad</code> on it.
+The released colab does literally this — the inner loop is a <code>lax.scan</code> over agent
+updates, and the meta-gradient is one <code>jax.grad</code>:</p>
+
+<pre><code class="language-python"># From disco_rl's official meta_train.ipynb (abridged) ------------------
+def _outer_loss(update_rule_params, agent_state, train_rollouts,
+                valid_rollout, rng):
+    # 1. INNER LOOP: N agent updates under the current rule.
+    #    is_meta_training=True =&gt; targets are NOT stop-gradiented,
+    #    so the graph from eta into each update is kept alive.
+    (_, new_learner_state, ...), train_metrics = jax.lax.scan(
+        _inner_step,                       # one full agent update
+        (update_rule_params, agent_state.learner_state, ...),
+        (train_rollouts, learner_rngs),
+    )
+
+    # 2. OUTER OBJECTIVE: run the *updated* agent on a held-out
+    #    validation rollout and score it with a policy-gradient
+    #    surrogate (advantage from a separate meta-value function).
+    adv_t = jax.lax.stop_gradient(value_out.normalized_adv)
+    pg_loss = utils.differentiable_policy_gradient_loss(
+        logits_on_valid, actions_on_valid, adv_t=adv_t, backprop=False)
+
+    # 3. Meta-regularizers (see section 4.5).
+    meta_loss = pg_loss.mean() + reg_loss
+    return meta_loss, aux
+
+# The entire meta-gradient -- second-order terms included -- is one call:
+meta_grads, outputs = jax.grad(_outer_loss, has_aux=True)(
+    update_rule_params, agent_state, train_rollouts, valid_rollout, rng)
+</code></pre>
+
+<p>What does autodiff actually do with this? Mechanically, when the outer backward pass reaches an
+inner step, it must differentiate <em>through</em> the node "<code>g = jax.grad(L)(theta, eta)</code>".
+But that node is itself a little program (the backward pass of \(L\)), built of multiplications,
+softmaxes, LSTM cells. So reverse-mode AD simply… backpropagates through the backward pass. This is
+called <b>reverse-over-reverse</b> differentiation, and it has two consequences:</p>
+
+<ul>
+<li><b>Compute:</b> each VJP through an inner step implicitly forms the products \(H_k v\) and
+\(C_k^\top v\) — Hessian-vector and mixed-derivative-vector products. Never full matrices: for
+Disco103's agent (\(\sim10^7\) params), \(H_k\) would be \(10^7 \times 10^7\). Everything stays
+matrix-free.</li>
+<li><b>Memory:</b> to backprop through the inner backward pass, you must store the inner backward
+pass's own intermediate values — for <em>every update in the window</em>. This is the memory bomb
+that §6 defuses.</li>
+</ul>
+
+<figure>
+<svg viewBox="0 0 860 360" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <!-- one inner update graph -->
+  <g font-size="13">
+    <rect x="30" y="150" width="110" height="48" rx="9" fill="#eef2fa" stroke="#3b5ba5" stroke-width="2"/>
+    <text x="85" y="179" text-anchor="middle" fill="#3b5ba5" font-weight="700">θₖ</text>
+    <rect x="30" y="40" width="110" height="48" rx="9" fill="#fdf1e7" stroke="#e8833a" stroke-width="2"/>
+    <text x="85" y="69" text-anchor="middle" fill="#b35c17" font-weight="700">η</text>
+    <rect x="30" y="260" width="110" height="48" rx="9" fill="#e8f3e8" stroke="#2e7d32" stroke-width="1.5"/>
+    <text x="85" y="283" text-anchor="middle" fill="#2e7d32" font-weight="600">batch 𝒟ₖ</text>
+    <text x="85" y="299" text-anchor="middle" font-size="10.5" fill="#2e7d32">(90% replay)</text>
+
+    <rect x="240" y="150" width="150" height="48" rx="9" fill="#fff" stroke="#1c1e26" stroke-width="1.5"/>
+    <text x="315" y="172" text-anchor="middle" font-weight="700">L(θₖ, η; 𝒟ₖ)</text>
+    <text x="315" y="190" text-anchor="middle" font-size="10.5" fill="#6b7280">KL to targets</text>
+
+    <rect x="480" y="150" width="160" height="48" rx="9" fill="#fff" stroke="#c0392b" stroke-width="2"/>
+    <text x="560" y="172" text-anchor="middle" fill="#c0392b" font-weight="700">gₖ = ∇θ L</text>
+    <text x="560" y="190" text-anchor="middle" font-size="10.5" fill="#6b7280">a graph, not a number</text>
+
+    <rect x="720" y="150" width="120" height="48" rx="9" fill="#eef2fa" stroke="#3b5ba5" stroke-width="2"/>
+    <text x="780" y="179" text-anchor="middle" fill="#3b5ba5" font-weight="700">θₖ₊₁</text>
+  </g>
+  <!-- forward edges -->
+  <g stroke="#3b5ba5" stroke-width="1.8" fill="none">
+    <line x1="140" y1="174" x2="235" y2="174" marker-end="url(#arr4-b)"/>
+  </g>
+  <g stroke="#e8833a" stroke-width="1.8" fill="none">
+    <path d="M140 64 C 190 64, 220 120, 255 148" marker-end="url(#arr4-o)"/>
+  </g>
+  <g stroke="#2e7d32" stroke-width="1.8" fill="none">
+    <path d="M140 284 C 190 284, 220 228, 255 200" marker-end="url(#arr4-g)"/>
+  </g>
+  <g stroke="#1c1e26" stroke-width="1.8" fill="none">
+    <line x1="390" y1="174" x2="475" y2="174" marker-end="url(#arr4-k)"/>
+    <line x1="640" y1="174" x2="715" y2="174" marker-end="url(#arr4-k)"/>
+  </g>
+  <text x="432" y="166" text-anchor="middle" font-size="11" fill="#6b7280">backward pass</text>
+  <text x="678" y="166" text-anchor="middle" font-size="11" fill="#6b7280">−α·Adam</text>
+  <!-- skip connection theta_k to theta_k+1 -->
+  <path d="M85 150 C 85 110, 700 100, 775 148" stroke="#3b5ba5" stroke-width="1.4" stroke-dasharray="5 4" fill="none" marker-end="url(#arr4-b)"/>
+  <text x="430" y="118" text-anchor="middle" font-size="11" fill="#3b5ba5">identity path (θₖ₊₁ also contains θₖ unchanged)</text>
+  <!-- cotangent flow -->
+  <g stroke="#c0392b" stroke-width="2.4" fill="none">
+    <path d="M775 205 C 740 250, 660 250, 600 205" stroke-dasharray="2 3" marker-end="url(#arr4-r)"/>
+    <path d="M520 205 C 470 250, 400 250, 350 205" stroke-dasharray="2 3" marker-end="url(#arr4-r)"/>
+    <path d="M270 195 C 200 160, 170 110, 142 80" stroke-dasharray="2 3" marker-end="url(#arr4-r)"/>
+  </g>
+  <text x="690" y="248" text-anchor="middle" font-size="11.5" fill="#c0392b">v = dJ/dθₖ₊₁ arrives</text>
+  <text x="430" y="248" text-anchor="middle" font-size="11.5" fill="#c0392b">differentiate THROUGH ∇θL ⇒ Hₖv, Cₖᵀv</text>
+  <text x="148" y="120" text-anchor="middle" font-size="11.5" fill="#c0392b">−αCₖᵀv lands on η</text>
+  <defs>
+    <marker id="arr4-b" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#3b5ba5"/></marker>
+    <marker id="arr4-o" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#e8833a"/></marker>
+    <marker id="arr4-g" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#2e7d32"/></marker>
+    <marker id="arr4-k" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#1c1e26"/></marker>
+    <marker id="arr4-r" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#c0392b"/></marker>
+  </defs>
+</svg>
+<figcaption><b>Figure 5 — One inner update as a computational graph.</b> The node
+\(g_k = \nabla_\theta L\) is not a leaf — it is a subgraph (the agent's backward pass). When the
+outer cotangent \(v\) (red, dashed) flows right-to-left, passing through that subgraph computes
+\(H_k v\) (continuing left toward \(\theta_k\)) and \(C_k^{\!\top} v\) (branching up into \(\eta\)).
+"Gradient through gradient" is just: the red path traverses a node that was itself produced by
+differentiation.</figcaption>
+</figure>
+
+<h3 id="sec44">4.4 The two halves of the estimator</h3>
+
+<p><b>Half one, \(\nabla_\eta\theta\), is exact but truncated.</b> Backpropagating through an
+agent's entire lifetime (hundreds of thousands of updates) is impossible, so DiscoRL backprops
+through a <b>sliding window of 20 agent updates</b> — truncated backprop-through-time, where "time"
+is optimization steps. Truncation makes the meta-gradient myopic: \(\eta\) gets direct credit only
+for what its teaching achieved within 20 updates. Two mechanisms push back against the myopia:
+the <b>lifetime meta-LSTM</b> (its hidden state persists across windows, carrying longer-horizon
+information forward even though gradients don't flow back through it forever), and the population
+itself — at any instant, different agents sit at different points of their lifetimes (their
+experience budgets — 200M, 100M, 50M or 20M steps, sampled with probability inversely proportional
+to length — guarantee it), so every meta-update averages teaching-lessons from young, middle-aged
+and old students simultaneously. The rule can't overfit to one life stage.</p>
+
+<p><b>Half two, \(\nabla_\theta J\), is an RL estimator, not autodiff.</b> You cannot differentiate
+the environment's reward through the simulator, so DiscoRL estimates "in which direction should the
+final parameters move" with the most battle-tested estimator in the book — advantage actor-critic:</p>
+
+$$
+\nabla_\theta J(\theta) \;\approx\;
+\mathbb{E}\Big[\, \bar A_t \,\nabla_\theta \log\pi_\theta(a_t\,|\,s_t) \Big],
+\qquad
+\bar A = \frac{A - \mu}{\sigma},
+$$
+
+<p>where the advantage comes from a <b>meta-value function</b> — a critic trained with V-trace
+(\(\gamma = 0.997\), TD(\(\lambda=0.95\))) that exists <em>only to estimate meta-gradients</em>. It is
+not part of the discovered rule; agents trained by Disco103 at evaluation time never see it. The
+normalization by lifetime-accumulated mean and standard deviation \((\mu,\sigma)\) is one of the
+quiet load-bearing tricks: agents live in environments whose returns differ by four orders of
+magnitude (Pong's ±21 vs. Atlantis's millions), and without it, the meta-gradients of
+loud environments would drown out everyone else. In the colab this is visible as
+<code>adv_t = jax.lax.stop_gradient(value_out.normalized_adv)</code>: the advantage is a fixed
+coefficient; gradients flow only through \(\log\pi_{\theta_N}\) — and from there, through the 20
+updates, into \(\eta\).</p>
+
+<p>One subtlety worth spelling out, because it confused me at first: the surrogate
+is evaluated on a <b>fresh validation rollout</b> collected <em>after</em> the inner-loop window
+(the colab literally collects a 2×-length held-out rollout for it; the production system generates
+48 fresh trajectories per meta-step). The rule is graded on generalization — "did your teaching
+make the student act better on data it hasn't trained on?" — not on how well the student memorized
+the window's own batches.</p>
+
+<h3 id="sec45">4.5 The stabilizer kit</h3>
+
+<p>Everything above is the textbook story. The Methods section and the code reveal what it takes to
+make it not explode. Each of these earns its place at scale:</p>
+
+<table>
+<tr><th>Trick</th><th>What it does</th><th>Why it's needed</th></tr>
+<tr>
+  <td><b>Per-agent Adam, then average</b><br>
+  \(\eta \leftarrow \eta + \tfrac1n\sum_i \text{ADAM}(g_i)\)</td>
+  <td>Each agent's meta-gradient goes through its own Adam normalizer <em>before</em> the population
+  average.</td>
+  <td>Adam's per-coordinate scale-invariance equalizes agents across environments — a second
+  defense (after advantage normalization) against loud-environment domination.</td>
+</tr>
+<tr>
+  <td><b>Prediction entropy bonus</b><br>
+  \(L_{\text{ent}} = -\mathbb{E}[H(y_\theta)+H(z_\theta)]\)</td>
+  <td>Added to the meta-objective; rewards rules whose students keep high-entropy predictions.</td>
+  <td>Prevents premature collapse: early in discovery the easiest way to minimize a KL is to make
+  targets and predictions both trivially peaked. Dead predictions = dead search space.</td>
+</tr>
+<tr>
+  <td><b>Trust region on policy targets</b><br>
+  \(L_{\text{KL}} = D_{\text{KL}}\!\big(\pi_{\theta^-}\,\|\,\hat\pi\big)\)</td>
+  <td>Penalizes policy targets that stray far from an EMA snapshot \(\theta^-\) of the agent.</td>
+  <td>The meta-net could otherwise propose arbitrarily aggressive policy jumps that score well for
+  one window and destroy the agent after. This is a learned-algorithm analogue of PPO's clip.</td>
+</tr>
+<tr>
+  <td><b>Target centering</b> (colab)<br>
+  \(\big\|\mathbb{E}[\hat y]\big\|^2 + \big\|\mathbb{E}[\hat z]\big\|^2 + \big\|\mathbb{E}[\hat\pi]\big\|^2\)</td>
+  <td>Small penalty on the mean of emitted target logits.</td>
+  <td>Removes a degenerate degree of freedom (constant offsets in logit space do nothing after
+  softmax but bloat meta-gradients).</td>
+</tr>
+<tr>
+  <td><b>Adam with stop-grad denominator</b><br>
+  (<code>optimizers.py</code>)</td>
+  <td>The inner Adam's update is \(\hat m/(\sqrt{\hat v}+\epsilon)\); meta-gradients flow through
+  \(\hat m\) but <code>stop_gradient</code> is applied to \(\hat v\).</td>
+  <td>Differentiating through the second-moment denominator adds a third second-order path that is
+  tiny, noisy, and couples the meta-gradient to gradient <em>scale</em> in a destabilizing way.
+  Cheaper and stabler to treat the preconditioner as a constant.</td>
+</tr>
+<tr>
+  <td><b>Agent resets + budget mixture</b></td>
+  <td>Agents restart from scratch when their budget (sampled from {200M, 100M, 50M, 20M} steps,
+  weights ∝ 1/budget) is consumed.</td>
+  <td>Keeps the population covering all phases of learning; most learning progress happens early in
+  a lifetime, so short lives are oversampled.</td>
+</tr>
+<tr>
+  <td><b>Meta-gradient clipping</b> (1.0) and meta-Adam lr \(10^{-3}\)</td>
+  <td>Standard, but on the meta level.</td>
+  <td>Second-order products through 20 updates have heavy tails. One bad window shouldn't lobotomize
+  the rule.</td>
+</tr>
+</table>
+
+<p>Note the paper's framing discipline: all of this machinery stabilizes <em>meta-optimization</em>
+only. None of it constrains how the discovered rule updates agents — the search space stays clean.</p>
+
+<!-- ================================================================ -->
+<h2 id="sec5"><span class="secno">5</span>Why KL-to-targets, not a learned loss</h2>
+
+<p>There were two other obvious designs, and earlier work tried both. The meta-network could output
+a <b>scalar loss</b> \(\ell_\eta(f_\theta)\) and let the agent descend it (Evolved Policy Gradients,
+MetaGenRL, Learned Policy Optimisation). Or it could output the <b>parameter update directly</b>
+(classic learned-optimizer style, back to Schmidhuber and Bengio). DiscoRL outputs <b>targets, matched
+with a KL divergence</b>. This choice is quietly one of the most important in the paper, and it's
+justified on three grounds: expressivity, conditioning, and interface.</p>
+
+<h3>5.1 Expressivity: targets strictly contain learned losses</h3>
+
+<p>Suppose the meta-net outputs a scalar loss \(\ell_\eta\big(f_\theta(s)\big)\). Whatever \(\eta\)
+is, the induced update direction on the prediction \(f\) is</p>
+
+$$
+\Delta f \;\propto\; -\,\frac{\partial \ell_\eta}{\partial f}\bigg|_{f_\theta(s)},
+$$
+
+<p>i.e., the update on predictions is always the (negative) <b>gradient field of some scalar
+potential</b>. Gradient fields are special: they are conservative (zero curl), they can't rotate, and
+their fixed points are extrema of the potential. But the most successful update rules in RL history
+are <em>not</em> gradient fields. Q-learning's semi-gradient</p>
+
+$$
+\Delta\theta \;\propto\; \Big(r + \gamma \max_{a'} Q_{\bar\theta}(s', a') - Q_\theta(s,a)\Big)\,\nabla_\theta Q_\theta(s,a)
+$$
+
+<p>deliberately ignores the dependence of the bootstrap target on \(\theta\) (that's the "semi") —
+and as a consequence is not the gradient of <em>any</em> objective (under linear function
+approximation this is a theorem: the update's vector field has non-zero curl, so no potential
+function exists). The same holds for
+TD(\(\lambda\)), Retrace, and friends. A learned-scalar-loss search space can never contain them;
+it can only contain residual-gradient-style methods, which are known to be worse in practice.</p>
+
+<p>Targets-plus-distance dodges this entirely. The update induced by a target is</p>
+
+$$
+\Delta\theta \;\propto\; -\,\nabla_\theta\, D\big(\underbrace{\hat y}_{\text{treated as constant}},\, y_\theta\big),
+$$
+
+<p>and because \(\hat y\) is produced by a separate network from <em>other quantities</em> —
+including the agent's own predictions at <em>future</em> timesteps — this is a semi-gradient by
+construction. The stop-gradient that defines bootstrapping has a natural home: it lives between the
+meta-network's output and the agent's loss. Searching over \(\eta\) searches over a space that
+includes TD, Q-learning, distillation, policy gradients (the target "current policy nudged along
+the advantage direction" reproduces them), and — the entire point — things none of us have
+names for.</p>
+
+<figure>
+<svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <!-- outer set -->
+  <ellipse cx="430" cy="170" rx="390" ry="140" fill="#fdf1e7" stroke="#e8833a" stroke-width="2"/>
+  <text x="430" y="60" text-anchor="middle" font-size="15" fill="#b35c17" font-weight="700">update rules expressible as  targets + KL   (DiscoRL search space)</text>
+  <!-- inner set -->
+  <ellipse cx="300" cy="195" rx="180" ry="80" fill="#eef2fa" stroke="#3b5ba5" stroke-width="2"/>
+  <text x="300" y="170" text-anchor="middle" font-size="13.5" fill="#3b5ba5" font-weight="700">gradient fields of a (learned) scalar loss</text>
+  <g font-size="12.5" fill="#3b5ba5">
+    <text x="300" y="205" text-anchor="middle">policy-gradient surrogates · residual-gradient TD</text>
+    <text x="300" y="228" text-anchor="middle">supervised distillation losses</text>
+  </g>
+  <!-- semi-gradient points -->
+  <g font-size="12.5" fill="#b35c17">
+    <circle cx="600" cy="140" r="4" fill="#b35c17"/><text x="612" y="144">Q-learning (semi-gradient)</text>
+    <circle cx="590" cy="180" r="4" fill="#b35c17"/><text x="602" y="184">TD(λ), Retrace, V-trace</text>
+    <circle cx="585" cy="220" r="4" fill="#b35c17"/><text x="597" y="224">bootstrapped aux tasks</text>
+  </g>
+  <!-- disco star -->
+  <g>
+    <text x="680" y="262" font-size="22" fill="#c0392b">★</text>
+    <text x="700" y="266" font-size="13" fill="#c0392b" font-weight="700">Disco103</text>
+  </g>
+</svg>
+<figcaption><b>Figure 6 — Search-space containment.</b> Anything a learned scalar loss can express,
+a target can express (set the target to "prediction minus loss-gradient"). The converse fails:
+semi-gradient rules — most of RL's greatest hits — are not the gradient of any scalar potential.
+The paper states it plainly: <i>"outputting targets is strictly more expressive than outputting a
+scalar loss function, as it includes semi-gradient methods such as Q-learning in the search
+space."</i></figcaption>
+</figure>
+
+<h3>5.2 Conditioning: KL makes the meta-landscape walkable</h3>
+
+<p>Why KL specifically, and why softmax everything first? Because of what it does to <em>both</em>
+optimization problems at once. Take the policy term, with target logits \(\hat\ell\) and agent
+logits \(\ell\) (the agent's KL is computed between the softmaxes). The gradient of
+\(D_{\mathrm{KL}}(\hat\pi \,\|\, \pi_\theta)\) with respect to the agent's logits is the
+gloriously simple</p>
+
+$$
+\frac{\partial}{\partial \ell}\, D_{\mathrm{KL}}\big(\hat\pi\,\|\,\mathrm{softmax}(\ell)\big)
+\;=\; \pi_\theta - \hat\pi .
+$$
+
+<p>Every component lives in \([-1, 1]\). The inner update literally <em>moves probability mass
+toward the target distribution</em>, with a step size that cannot blow up no matter what the
+meta-network emits. Contrast a learned scalar loss: nothing constrains its curvature or scale, so
+the meta-net controls not only the direction but the <em>magnitude and conditioning</em> of every
+inner step — a recipe for inner-loop divergence half-way through every meta-experiment. With
+KL-to-softmaxed-targets, the meta-network's expressive power is spent exactly where you want it
+(<em>where should beliefs move</em>) and not where you don't (<em>how violently</em>). The fixed loss
+weights (1.0, 1.0, 1.0, 0.2) and the agent's gradient clipping stay hand-controlled.</p>
+
+<p>This bounded-gradient property compounds through the meta-gradient too. Look back at the
+recursion in §4.2: \(\nabla_\eta J\) contains products of inner-loss second derivatives. For KL of
+softmaxes, those Hessians are softmax covariance matrices — bounded, smooth, with no exploding
+directions. The paper's citation trail (this design is inherited from LPG, Oh et&nbsp;al. 2020)
+says the quiet part: KL was chosen because it <i>"has previously been found to make meta-optimization
+easier."</i> Even the value function is made categorical (601 bins, two-hot targets, MuZero-style)
+so that <em>its</em> loss is also a bounded cross-entropy rather than an unbounded squared error —
+every learnable quantity in the agent presents the same well-conditioned interface to the
+discovery process.</p>
+
+<h3>5.3 Interface: targets are architecture- and action-space-agnostic</h3>
+
+<p>The third reason is engineering-shaped but decisive for generality. A rule that outputs
+per-parameter updates is welded to one architecture. A rule that outputs a loss must still be
+differentiated, fixing what "the loss's inputs" are. A rule that outputs <em>targets for the
+agent's outputs</em> only needs the agent to <em>have outputs</em> — any torso (the discovery agents
+were small; the Atari evaluation agent was MuZero-sized, and the rule transferred), any
+observation space (the meta-net never sees observations, only predictions), and any action space
+(action-indexed inputs and outputs are processed with weights shared across the action dimension).
+That's also why your and my Craftax agents — architectures never seen in discovery — train fine
+under Disco103's frozen weights.</p>
+
+<div class="box">
+<b>Ablation receipts</b> — On Atari (IQM after discovery from 16 games): full system 11.6; remove
+the auxiliary prediction \(p\): 10.5; shrink the discovery agents: 8.7; remove the discovered
+predictions \(y, z\) entirely: 5.0; discover from toy gridworlds instead of Atari: 3.4; remove the
+value function: 2.9. The discovered prediction channels more than double the rule's quality, and
+the value function — the one predefined semantic anchor — matters most of all. Bootstrapping
+emerges without being asked for: perturbing the prediction \(z_{t+L}\) at a future step visibly
+changes the target \(\hat z_t\) today (Fig. 4d), and cutting prediction inputs off when computing
+targets craters performance (Fig. 4e).
+</div>
+
+<!-- ================================================================ -->
+<h2 id="sec6"><span class="secno">6</span>The memory wall, and MixFlow-MG</h2>
+
+<p>Now the part the Nature paper dispatches in one sentence (<i>"We used MixFlow-MG to minimize the
+computational cost of the runs"</i>) and which deserves a whole section, because it's the difference
+between this experiment fitting on TPUs or not.</p>
+
+<h3>6.1 Where the memory goes</h3>
+
+<p>Reverse-mode AD's deal with the devil is: <em>store the forward pass, get cheap gradients</em>.
+For an ordinary training step you store the activations \(A\) of one forward pass. But our outer
+"forward pass" is <em>twenty agent updates, each containing its own forward AND backward pass</em>.
+Reverse-over-reverse differentiation must therefore store, for every inner step \(i\) in the
+window:</p>
+
+<ul>
+  <li>the activations of the inner forward pass (loss computation: agent unroll + meta-net unroll), <em>and</em></li>
+  <li>the intermediates of the inner <em>backward</em> pass (the graph that computed \(g_i\)) — because
+  the outer cotangent must traverse it, <em>and</em></li>
+  <li>the parameters and optimizer state \((\theta_i, \upsilon_i)\) at that step.</li>
+</ul>
+
+<p>Total: \(\mathcal{O}\big(T\cdot(|A| + |\theta| + |\upsilon|)\big)\) for a \(T\)-step window.
+(Notation note: this section keeps MixFlow-MG's symbols, where \(T\) counts <em>updates in the
+window</em> — the \(N\) of §4.2 — not trajectory timesteps.) The activation term dominates, and it
+scales like batch × unroll-length × network size. For
+DiscoRL's production batches (96 trajectories × 29 steps per update, ×20 updates, with an LSTM
+meta-net woven through every one of them), naive nesting simply does not fit. Gradient
+checkpointing (<code>jax.remat</code>) trades memory for recompute and gets you to
+\(\mathcal{O}(|A| + T(|\theta|+|\upsilon|))\), but the recomputation tax across a 20-step window is
+brutal, and the per-step backward graphs must <em>still</em> be materialized when their turn comes.</p>
+
+<h3>6.2 The reparameterization: make the gradient a first-class citizen</h3>
+
+<p>MixFlow-MG (Kemaev, Calian, Zintgraf, Farquhar, van Hasselt — the DiscoRL infrastructure
+authors) starts from a deceptively bureaucratic move. Write the inner update not as a monolithic
+\(\Phi\), but with the inner gradient exposed as an explicit argument:</p>
+
+$$
+(\theta_{i+1}, \upsilon_{i+1})
+= \Phi(\theta_i, \upsilon_i, \eta, x_i)
+= \Upsilon\big(\underbrace{\nabla L_i}_{\text{explicit!}},\; \theta_i, \upsilon_i, \eta, x_i\big).
+$$
+
+<p>Now differentiate the unrolled chain with respect to \(\eta\). The total derivative picks up
+exactly the terms we met in §4.2, but with the optimizer's Jacobians factored out:</p>
+
+$$
+\frac{d\,\Upsilon_{i+1}}{d\eta}
+= \left[\frac{\partial \Upsilon_{i+1}}{\partial \theta_i}
+      + \frac{\partial \Upsilon_{i+1}}{\partial \nabla L_i}\,\frac{\partial^2 L}{\partial \theta_i^2}
+\;,\;\; \frac{\partial \Upsilon_{i+1}}{\partial \upsilon_i}\right]
+\frac{d\,\Upsilon_i}{d\eta}
+\;+\;
+\frac{\partial \Upsilon_{i+1}}{\partial \nabla L_i}\,
+\frac{\partial^2 L}{\partial \eta\,\partial \theta_i}
+\;+\;
+\frac{\partial \Upsilon_{i+1}}{\partial \eta}.
+$$
+
+<p>In reverse mode, the expensive pieces are the cotangent products with the two second-derivative
+blocks: \(v^\top\!\cdot \partial^2 L/\partial\theta_i^2\) (vector-Hessian product) and
+\(v^\top\!\cdot \partial^2 L/\partial\eta\,\partial\theta_i\) (vector-mixed-derivative product). The
+naive implementation computes them by backpropagating through the stored backward graph. And here
+is the entire trick, in one application of Schwarz's theorem — second derivatives of a (twice
+continuously differentiable) function are symmetric:</p>
+
+$$
+\frac{\partial^2 L}{\partial \theta^2} = \Big(\frac{\partial^2 L}{\partial \theta^2}\Big)^{\!\top},
+\qquad
+\frac{\partial^2 L}{\partial \eta\,\partial \theta} = \Big(\frac{\partial^2 L}{\partial \theta\,\partial \eta}\Big)^{\!\top}.
+$$
+
+<p>So every <em>vector-by-Hessian</em> product equals the transpose of a <em>Hessian-by-vector</em>
+product — and Hessian-by-vector products have a famously cheap implementation that needs
+<b>no second backward graph at all</b>: forward-mode differentiation <em>of</em> the gradient
+function,</p>
+
+$$
+\frac{\partial^2 L}{\partial\theta^2}\, v \;=\; \lim_{\epsilon\to0}\frac{\nabla_\theta L(\theta + \epsilon v) - \nabla_\theta L(\theta)}{\epsilon}
+\;=\; \texttt{jvp}\big(\nabla_\theta L,\; \theta,\; v\big),
+$$
+
+<p>and identically for the mixed block: \(v^\top \partial^2L/\partial\eta\,\partial\theta\) is the
+JVP of the function \(\theta \mapsto \nabla_\eta L(\theta,\eta)\) in direction \(v\). This is
+<b>forward-over-reverse</b> — mixed-mode — differentiation: reverse mode on the inside (one
+gradient), forward mode on the outside (one tangent riding along it).</p>
+
+<pre><code class="language-python"># The whole of MixFlow-MG's core, in JAX:
+g_fn = jax.grad(L, argnums=(0, 1))         # th -&gt; (grad_theta L, grad_eta L)
+
+# Naive (reverse-over-reverse): differentiate through a STORED backward graph.
+#   vT_H  = jax.vjp(jax.grad(L), theta)[1](v)        # stores backward graph
+# MixFlow (forward-over-reverse): push tangent v through the SAME backward pass.
+_, (Hv, Mv) = jax.jvp(lambda th: g_fn(th, eta), (theta,), (v,))
+#    Hv =  d(grad_theta L)/d theta . v   =  Hessian-vector product
+#    Mv =  d(grad_eta   L)/d theta . v   =  mixed-derivative product
+# By symmetry these EQUAL the v.(d2L/dtheta2) and v.(d2L/deta dtheta)
+# that the outer backward pass needs. Same numbers, different mode.
+</code></pre>
+
+<h3>6.3 Why forward-over-reverse is so much cheaper</h3>
+
+<p>The asymmetry between the modes is all about what must be <em>remembered</em>:</p>
+
+<ul>
+<li><b>Reverse mode</b> over a computation must store that computation's intermediates, because
+cotangents are consumed in the <em>opposite</em> order to how values are produced. Reverse over the
+inner backward pass ⇒ store the backward pass.</li>
+<li><b>Forward mode</b> propagates tangents <em>in the same order</em> as the primal computation —
+each intermediate tangent is consumed immediately and can be freed. Forward over the inner
+backward pass ⇒ store (almost) nothing extra. Cost: roughly 2× the FLOPs of the pass it rides on,
+which is why wall-clock improves only modestly while memory improves dramatically.</li>
+</ul>
+
+<figure>
+<svg viewBox="0 0 860 470" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <!-- panel A -->
+  <text x="20" y="30" font-size="15" font-weight="700" fill="#1c1e26">A — reverse-over-reverse (naive nested grad)</text>
+  <g font-size="11.5">
+    <!-- forward boxes -->
+    <rect x="20" y="50" width="160" height="40" rx="7" fill="#eef2fa" stroke="#3b5ba5"/>
+    <text x="100" y="74" text-anchor="middle" fill="#3b5ba5">inner forward (L)</text>
+    <rect x="200" y="50" width="160" height="40" rx="7" fill="#fbeeea" stroke="#c0392b"/>
+    <text x="280" y="74" text-anchor="middle" fill="#c0392b">inner backward (∇L)</text>
+    <rect x="380" y="50" width="120" height="40" rx="7" fill="#eef2fa" stroke="#3b5ba5"/>
+    <text x="440" y="74" text-anchor="middle" fill="#3b5ba5">optimizer step</text>
+    <!-- stored -->
+    <g>
+      <rect x="20" y="110" width="160" height="26" rx="5" fill="#3b5ba5" opacity="0.75"/>
+      <text x="100" y="128" text-anchor="middle" fill="#fff">activations stored</text>
+      <rect x="200" y="110" width="160" height="26" rx="5" fill="#c0392b" opacity="0.8"/>
+      <text x="280" y="128" text-anchor="middle" fill="#fff">backward graph stored</text>
+      <rect x="380" y="110" width="120" height="26" rx="5" fill="#6b7280" opacity="0.7"/>
+      <text x="440" y="128" text-anchor="middle" fill="#fff">θᵢ, υᵢ stored</text>
+    </g>
+    <text x="540" y="76" font-size="13" fill="#6b7280">× 20 updates in the window</text>
+    <text x="540" y="128" font-size="13" fill="#c0392b" font-weight="700">× 20  ← the bomb</text>
+    <text x="20" y="166" font-size="12.5" fill="#6b7280">memory ≈ 𝒪( T · (|A| + |θ| + |υ|) )   — everything, for every step, until the outer backward arrives</text>
+  </g>
+  <!-- panel B -->
+  <text x="20" y="215" font-size="15" font-weight="700" fill="#1c1e26">B — MixFlow-MG (forward-over-reverse)</text>
+  <g font-size="11.5">
+    <rect x="20" y="235" width="160" height="40" rx="7" fill="#eef2fa" stroke="#3b5ba5"/>
+    <text x="100" y="259" text-anchor="middle" fill="#3b5ba5">inner forward (L)</text>
+    <rect x="200" y="235" width="160" height="40" rx="7" fill="#fbeeea" stroke="#c0392b"/>
+    <text x="280" y="259" text-anchor="middle" fill="#c0392b">inner backward (∇L)</text>
+    <rect x="380" y="235" width="120" height="40" rx="7" fill="#eef2fa" stroke="#3b5ba5"/>
+    <text x="440" y="259" text-anchor="middle" fill="#3b5ba5">optimizer step</text>
+    <!-- tangent ribbon -->
+    <path d="M20 292 C 150 292, 350 292, 500 292" stroke="#e8833a" stroke-width="6" fill="none" opacity="0.85"/>
+    <text x="260" y="312" text-anchor="middle" fill="#b35c17" font-weight="600">tangent v rides along — consumed as produced, nothing stored</text>
+    <!-- stored -->
+    <rect x="380" y="330" width="120" height="26" rx="5" fill="#6b7280" opacity="0.7"/>
+    <text x="440" y="348" text-anchor="middle" fill="#fff">θᵢ, υᵢ stored</text>
+    <rect x="20" y="330" width="160" height="26" rx="5" fill="#3b5ba5" opacity="0.35"/>
+    <text x="100" y="348" text-anchor="middle" fill="#3b5ba5">remat: recompute per block</text>
+    <text x="540" y="348" font-size="13" fill="#2e7d32" font-weight="700">× 20, but only the small stuff</text>
+    <text x="20" y="386" font-size="12.5" fill="#6b7280">memory ≈ 𝒪( |A|/L + T · (|θ| + |υ|) )  with block-remat — activation term independent of depth</text>
+  </g>
+  <!-- memory bars -->
+  <g font-size="12">
+    <text x="20" y="430" fill="#1c1e26" font-weight="600">peak memory:</text>
+    <rect x="140" y="416" width="600" height="18" rx="4" fill="#c0392b" opacity="0.8"/>
+    <text x="750" y="430" fill="#c0392b">naive</text>
+    <rect x="140" y="442" width="55" height="18" rx="4" fill="#2e7d32" opacity="0.8"/>
+    <text x="205" y="456" fill="#2e7d32">MixFlow-MG (>10× less, identical numerics)</text>
+  </g>
+</svg>
+<figcaption><b>Figure 7 — Where the memory goes, and where it stops going.</b> The naive nested
+<code>grad</code> stores the inner backward graph of all 20 updates so the outer backward pass can
+traverse them later. MixFlow-MG replaces that traversal with forward-mode tangents that ride along
+each inner backward pass as it happens — same second-order numbers (Schwarz symmetry guarantees
+it), no stored second graph. Combined with per-block rematerialization, peak activation memory
+becomes independent of network depth.</figcaption>
+</figure>
+
+<p>For completeness, the four ways to compose a second derivative, and why this corner wins:</p>
+
+<table>
+<tr><th>Mode</th><th>Computes</th><th>Extra memory</th><th>Verdict</th></tr>
+<tr><td><b>reverse-over-reverse</b></td><td>\(v^\top H\) directly</td><td>stores the inner backward graph, ×T</td><td>what <code>grad(grad(·))</code> gives you; the default; the bomb</td></tr>
+<tr><td><b>forward-over-reverse</b></td><td>\(Hv\) (= \(v^\top H\) by symmetry)</td><td>≈ none beyond one gradient pass</td><td><b>MixFlow-MG</b></td></tr>
+<tr><td>reverse-over-forward</td><td>\(Hv\)</td><td>stores the (cheap) forward-tangent pass</td><td>also fine; equivalent numerics, slightly different engineering</td></tr>
+<tr><td>forward-over-forward</td><td>one Hessian <em>column</em> per pass</td><td>none</td><td>needs \(|\theta|\) passes; hopeless</td></tr>
+</table>
+
+<p>The reported results: peak memory down ~75% (4×) in typical configurations and <b>over 90%
+(10×+)</b> in large ones — converging to ~25× on TPU for Chinchilla-style transformer
+meta-learning — plus up to 25% faster wall-clock, with <em>bit-identical meta-gradients</em>. It's a
+pure implementation theorem: nothing about the optimization problem changes. (My toy in §7 verifies
+the "identical" claim to within float32 roundoff: max relative deviation ~10⁻⁷ across all
+meta-parameter leaves.)</p>
+
+<div class="intuition">
+<b>Why this matters beyond DiscoRL</b> — Nothing in MixFlow-MG is meta-RL-specific. Any bilevel
+problem with a gradient-based inner loop — hyperparameter optimization, MAML-family adaptation,
+learned optimizers, data-distillation, RLHF-through-finetuning schemes — hits the same
+reverse-over-reverse wall and admits the same fix. If you remember one implementation idea from
+this post: <b>when you need \(v^\top\!\cdot\partial(\text{gradient})\), transpose it into a JVP of
+the gradient and let forward mode ride the backward pass.</b>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="sec7"><span class="secno">7</span>A 200-line DiscoRL you can run</h2>
+
+<p>Time to make all of it concrete. Below is a complete, runnable meta-training loop —
+<code>blog/toy_discorl.py</code> in the repo — that preserves every <em>conceptual</em> ingredient
+and throws away every scale ingredient. The world is a 6-state corridor: start at the left, reward
+1 for reaching the right end within 10 steps, absorbing goal. A uniform-random policy succeeds
+17.5% of the time. The agent is tabular — policy logits <code>pi[6,2]</code> and a 4-dimensional
+prediction <code>y[6,4]</code> with no assigned meaning. The meta-network is a 16-unit RNN that
+scans each trajectory <em>backwards</em> over
+(reward, action, \(\pi(\cdot|s)\), \(\mathrm{softmax}\,y_t\), \(\mathrm{softmax}\,y_{t+1}\)) and
+emits per-step targets \((\hat\pi_t, \hat y_t)\). The agent takes 8 SGD steps on
+\(\mathrm{KL}(\hat\pi\|\pi) + \mathrm{KL}(\hat y\|y)\); the meta-objective is the <em>exact</em>
+expected return of the final policy, computed differentiably by dynamic programming (the luxury of
+a 6-state MDP — this stands in for the actor-critic estimator of §4.4); and
+<code>jax.grad</code> through the whole unroll is the meta-gradient.</p>
+
+<pre><code class="language-python">import functools
+import jax
+import jax.numpy as jnp
+import optax
+
+S, A, K_PRED, H_META = 6, 2, 4, 16   # states, actions, |y|, meta hidden size
+T, B, K_INNER = 10, 16, 8            # horizon, rollouts/update, inner updates
+ALPHA = 5.0                          # inner SGD learning rate
+GOAL = S - 1
+
+# ----------------------------------------------------------------------------
+# Environment: chain MDP with absorbing goal.
+# ----------------------------------------------------------------------------
+def env_step(s, a):
+    s2 = jnp.where(s == GOAL, GOAL, jnp.clip(s + 2 * a - 1, 0, GOAL))
+    r = jnp.where((s != GOAL) &amp; (s2 == GOAL), 1.0, 0.0)
+    return s2, r
+
+def rollout(theta, key):
+    """Sample one trajectory. Data only -- no gradient flows through sampling."""
+    pi_logits = jax.lax.stop_gradient(theta['pi'])
+
+    def step(s, key_t):
+        a = jax.random.categorical(key_t, pi_logits[s])
+        s2, r = env_step(s, a)
+        return s2, (s, a, r)
+
+    keys = jax.random.split(key, T)
+    s_last, (ss, aa, rr) = jax.lax.scan(step, jnp.int32(0), keys)
+    states = jnp.concatenate([ss, s_last[None]])          # [T+1]
+    return dict(s=states, a=aa, r=rr)
+
+def exact_return(pi_logits):
+    """Differentiable J(pi): exact probability of reaching the goal within T.
+    This is the toy's stand-in for the advantage actor-critic estimator."""
+    pi = jax.nn.softmax(pi_logits)
+    idx = jnp.arange(S)
+
+    def step(carry, _):
+        p, j = carry
+        mass = p.at[GOAL].set(0.0)                        # non-absorbed mass
+        p2 = jnp.zeros(S).at[jnp.clip(idx + 1, 0, GOAL)].add(pi[:, 1] * mass)
+        p2 = p2.at[jnp.clip(idx - 1, 0, GOAL)].add(pi[:, 0] * mass)
+        r = p2[GOAL]                                      # newly absorbed mass
+        p2 = p2.at[GOAL].add(p[GOAL])
+        return (p2, j + r), None
+
+    p0 = jnp.zeros(S).at[0].set(1.0)
+    (_, j), _ = jax.lax.scan(step, (p0, 0.0), None, length=T)
+    return j
+
+# ----------------------------------------------------------------------------
+# Meta-network: backwards RNN over the trajectory -&gt; targets (pi_hat, y_hat).
+# ----------------------------------------------------------------------------
+def init_eta(key):
+    f = 1 + A + A + 2 * K_PRED                            # per-step features
+    k1, k2, k3, k4 = jax.random.split(key, 4)
+    g = lambda k, shape, s: s * jax.random.normal(k, shape)
+    return dict(Wx=g(k1, (f, H_META), 0.3), Wh=g(k2, (H_META, H_META), 0.3),
+                b=jnp.zeros(H_META),
+                Wpi=g(k3, (H_META, A), 0.1), Wy=g(k4, (H_META, K_PRED), 0.1))
+
+def meta_targets(eta, theta, traj):
+    s, a, r = traj['s'], traj['a'], traj['r']
+    pi_p = jax.nn.softmax(theta['pi'][s[:-1]])            # [T, A]
+    y_p = jax.nn.softmax(theta['y'][s])                   # [T+1, K]
+    # Inputs are treated as data w.r.t. theta (cf. stop_grad input transforms).
+    pi_p, y_p = jax.lax.stop_gradient((pi_p, y_p))
+    feats = jnp.concatenate(                              # [T, F]
+        [r[:, None], jax.nn.one_hot(a, A), pi_p, y_p[:-1], y_p[1:]], axis=-1)
+
+    def cell(h, x):                                       # h carries the FUTURE
+        h = jnp.tanh(x @ eta['Wx'] + h @ eta['Wh'] + eta['b'])
+        return h, h
+
+    _, hs = jax.lax.scan(cell, jnp.zeros(H_META), feats, reverse=True)
+    return hs @ eta['Wpi'], hs @ eta['Wy']                # target logits
+
+# ----------------------------------------------------------------------------
+# Agent loss: KL(targets || predictions), gradients flow into eta via targets.
+# ----------------------------------------------------------------------------
+def kl(p_logits, q_logits):
+    p = jax.nn.softmax(p_logits)
+    return jnp.sum(p * (jax.nn.log_softmax(p_logits)
+                        - jax.nn.log_softmax(q_logits)), axis=-1)
+
+def agent_loss(theta, eta, traj):
+    pi_hat, y_hat = meta_targets(eta, theta, traj)
+    s = traj['s'][:-1]
+    return jnp.mean(kl(pi_hat, theta['pi'][s]) + kl(y_hat, theta['y'][s]))
+
+def batched_loss(theta, eta, trajs):
+    return jnp.mean(jax.vmap(agent_loss, in_axes=(None, None, 0))(
+        theta, eta, trajs))
+
+def init_theta():
+    return dict(pi=jnp.zeros((S, A)), y=jnp.zeros((S, K_PRED)))
+
+# ----------------------------------------------------------------------------
+# Meta-objective: unroll K_INNER agent updates, return -J(theta_K).
+# jax.grad of this is the meta-gradient (reverse-over-reverse by default).
+# ----------------------------------------------------------------------------
+def unroll_inner(eta, key, step_fn):
+    theta = init_theta()
+    for _ in range(K_INNER):
+        key, sub = jax.random.split(key)
+        trajs = jax.vmap(rollout, in_axes=(None, 0))(
+            theta, jax.random.split(sub, B))
+        theta = step_fn(theta, eta, trajs)
+    return theta
+
+def sgd_step(theta, eta, trajs):
+    g = jax.grad(batched_loss)(theta, eta, trajs)
+    return jax.tree.map(lambda p, gi: p - ALPHA * gi, theta, g)
+
+def meta_loss(eta, key):
+    theta = unroll_inner(eta, key, sgd_step)
+    return -exact_return(theta['pi'])
+</code></pre>
+
+<p>That's the entire discovery method. The meta-training loop is just Adam on
+<code>jax.grad(meta_loss)</code> with global-norm clipping at 1.0 (same as the real system).
+Run it:</p>
+
+<pre class="term-output"><code>$ python blog/toy_discorl.py
+J(theta_0) uniform policy: 0.175
+meta-iter    0   J(theta_8) = 0.162
+meta-iter   50   J(theta_8) = 0.968
+meta-iter  100   J(theta_8) = 0.975
+meta-iter  200   J(theta_8) = 0.979
+  ...              (prints every 50 iters)
+meta-iter  600   J(theta_8) = 0.979
+REINFORCE baseline, best lr=10.0: J = 0.851
+max relative error naive vs mixflow meta-gradient, per eta leaf:
+  Wh: 7.4e-07   Wpi: 8.8e-07   Wx: 1.8e-07   Wy: 0.0   b: 1.8e-07
+</code></pre>
+
+<figure>
+<svg viewBox="0 0 860 380" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <line x1="70" y1="320" x2="825" y2="320" stroke="#6b7280" stroke-width="1.2"/>
+  <line x1="70" y1="320" x2="70" y2="30" stroke="#6b7280" stroke-width="1.2"/>
+  <line x1="70.0" y1="320" x2="70.0" y2="325" stroke="#6b7280"/><text x="70.0" y="342" text-anchor="middle" font-size="12" fill="#6b7280">0</text><line x1="195.83333333333331" y1="320" x2="195.83333333333331" y2="325" stroke="#6b7280"/><text x="195.83333333333331" y="342" text-anchor="middle" font-size="12" fill="#6b7280">100</text><line x1="321.66666666666663" y1="320" x2="321.66666666666663" y2="325" stroke="#6b7280"/><text x="321.66666666666663" y="342" text-anchor="middle" font-size="12" fill="#6b7280">200</text><line x1="447.5" y1="320" x2="447.5" y2="325" stroke="#6b7280"/><text x="447.5" y="342" text-anchor="middle" font-size="12" fill="#6b7280">300</text><line x1="573.3333333333333" y1="320" x2="573.3333333333333" y2="325" stroke="#6b7280"/><text x="573.3333333333333" y="342" text-anchor="middle" font-size="12" fill="#6b7280">400</text><line x1="699.1666666666666" y1="320" x2="699.1666666666666" y2="325" stroke="#6b7280"/><text x="699.1666666666666" y="342" text-anchor="middle" font-size="12" fill="#6b7280">500</text><line x1="825.0" y1="320" x2="825.0" y2="325" stroke="#6b7280"/><text x="825.0" y="342" text-anchor="middle" font-size="12" fill="#6b7280">600</text>
+  <line x1="65" y1="320" x2="70" y2="320" stroke="#6b7280"/><text x="60" y="324" text-anchor="end" font-size="12" fill="#6b7280">0</text><line x1="65" y1="250.0" x2="70" y2="250.0" stroke="#6b7280"/><text x="60" y="254.0" text-anchor="end" font-size="12" fill="#6b7280">0.25</text><line x1="65" y1="180.0" x2="70" y2="180.0" stroke="#6b7280"/><text x="60" y="184.0" text-anchor="end" font-size="12" fill="#6b7280">0.5</text><line x1="65" y1="110.0" x2="70" y2="110.0" stroke="#6b7280"/><text x="60" y="114.0" text-anchor="end" font-size="12" fill="#6b7280">0.75</text><line x1="65" y1="40.0" x2="70" y2="40.0" stroke="#6b7280"/><text x="60" y="44.0" text-anchor="end" font-size="12" fill="#6b7280">1</text>
+  <text x="447.5" y="358" text-anchor="middle" font-size="13" fill="#6b7280">meta-iteration</text>
+  <text x="20" y="180.0" text-anchor="middle" font-size="13" fill="#6b7280" transform="rotate(-90 20 180.0)">J(θ₈) of a fresh agent</text>
+  <line x1="70" y1="40.0" x2="825" y2="40.0" stroke="#d8d2c4" stroke-width="1.2" stroke-dasharray="3 4"/>
+  <text x="825" y="33.0" text-anchor="end" font-size="12" fill="#9a9486">optimal policy: 1.0</text>
+  <line x1="70" y1="81.72" x2="825" y2="81.72" stroke="#3b5ba5" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text x="825" y="99.72" text-anchor="end" font-size="12.5" fill="#3b5ba5" font-weight="600">tuned REINFORCE (best of lr sweep): 0.851</text>
+  <line x1="70" y1="271.0" x2="825" y2="271.0" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text x="825" y="263.0" text-anchor="end" font-size="12.5" fill="#6b7280">uniform random policy: 0.175</text>
+  <polyline points="70.0,274.5 71.3,268.5 72.5,262.3 73.8,255.8 75.0,247.3 76.3,239.3 77.5,229.1 78.8,217.6 80.1,204.3 81.3,189.1 82.6,171.9 83.8,156.5 85.1,145.8 86.4,133.3 87.6,120.8 88.9,110.5 90.1,99.7 91.4,93.7 92.7,87.3 93.9,76.9 95.2,73.0 96.4,71.5 97.7,66.6 98.9,63.0 100.2,61.0 101.5,60.1 102.7,58.3 104.0,56.7 105.2,56.1 106.5,54.5 107.8,53.9 109.0,53.1 110.3,51.6 111.5,51.7 112.8,51.5 114.0,50.7 115.3,50.9 116.6,50.7 117.8,50.0 119.1,50.1 120.3,49.7 121.6,49.8 122.8,49.9 124.1,49.1 125.4,48.7 126.6,48.4 127.9,48.7 129.1,48.2 130.4,48.5 131.7,48.8 132.9,48.9 134.2,48.0 135.4,48.3 136.7,47.9 137.9,47.7 139.2,47.8 140.5,48.7 141.7,47.6 143.0,47.5 144.2,47.8 145.5,47.5 146.8,47.2 148.0,47.2 149.3,47.5 150.5,48.0 151.8,47.2 153.1,47.1 154.3,47.5 155.6,46.7 156.8,47.4 158.1,47.6 159.3,47.4 160.6,47.6 161.9,47.2 163.1,46.9 164.4,47.9 165.6,46.4 166.9,46.5 168.2,47.1 169.4,46.7 170.7,46.8 171.9,47.1 173.2,47.6 174.4,46.7 175.7,47.0 177.0,47.0 178.2,46.4 179.5,46.8 180.7,47.4 182.0,47.1 183.2,46.9 184.5,46.6 185.8,47.3 187.0,46.6 188.3,46.4 189.5,46.4 190.8,46.5 192.1,46.9 193.3,47.5 194.6,46.2 195.8,47.1 197.1,46.7 198.3,47.1 199.6,47.1 200.9,46.8 202.1,46.8 203.4,46.9 204.6,46.7 205.9,46.0 207.2,46.8 208.4,45.9 209.7,47.0 210.9,46.2 212.2,46.6 213.4,47.3 214.7,46.9 216.0,46.4 217.2,46.2 218.5,46.1 219.7,47.2 221.0,46.9 222.3,46.4 223.5,46.8 224.8,46.2 226.0,46.4 227.3,46.1 228.6,47.0 229.8,45.8 231.1,46.3 232.3,46.4 233.6,46.8 234.8,46.6 236.1,46.3 237.4,46.7 238.6,45.9 239.9,46.7 241.1,46.7 242.4,46.1 243.7,46.5 244.9,46.3 246.2,46.6 247.4,46.5 248.7,46.7 249.9,46.4 251.2,46.0 252.5,46.3 253.7,46.3 255.0,47.1 256.2,46.3 257.5,46.6 258.8,46.6 260.0,46.4 261.3,45.9 262.5,45.7 263.8,45.9 265.0,46.4 266.3,45.6 267.6,46.8 268.8,47.2 270.1,46.3 271.3,46.0 272.6,46.1 273.9,46.5 275.1,46.6 276.4,46.0 277.6,46.5 278.9,46.0 280.1,46.0 281.4,46.2 282.7,46.3 283.9,45.7 285.2,46.5 286.4,45.9 287.7,45.8 288.9,45.8 290.2,46.9 291.5,45.5 292.7,46.2 294.0,46.1 295.2,46.7 296.5,46.4 297.8,46.3 299.0,46.4 300.3,46.3 301.5,46.5 302.8,45.8 304.1,45.5 305.3,45.5 306.6,45.8 307.8,46.4 309.1,45.9 310.3,46.6 311.6,45.8 312.9,46.0 314.1,46.4 315.4,46.4 316.6,46.2 317.9,45.9 319.1,45.7 320.4,45.6 321.7,45.8 322.9,45.5 324.2,45.7 325.4,45.5 326.7,45.7 328.0,46.0 329.2,45.4 330.5,45.6 331.7,46.4 333.0,45.5 334.2,46.1 335.5,45.6 336.8,45.7 338.0,45.8 339.3,45.6 340.5,45.9 341.8,45.8 343.1,45.9 344.3,46.7 345.6,45.5 346.8,46.0 348.1,45.6 349.4,45.9 350.6,46.3 351.9,46.0 353.1,45.8 354.4,45.8 355.6,45.3 356.9,45.7 358.2,46.3 359.4,46.7 360.7,46.0 361.9,45.4 363.2,46.0 364.4,46.0 365.7,46.1 367.0,45.7 368.2,46.0 369.5,46.2 370.7,45.8 372.0,45.8 373.3,47.3 374.5,45.7 375.8,45.9 377.0,46.2 378.3,46.1 379.6,45.8 380.8,46.3 382.1,46.1 383.3,45.7 384.6,45.9 385.8,46.0 387.1,45.3 388.4,46.0 389.6,45.7 390.9,46.0 392.1,46.2 393.4,45.9 394.6,45.7 395.9,45.7 397.2,46.5 398.4,45.7 399.7,45.7 400.9,45.3 402.2,45.8 403.5,45.5 404.7,45.9 406.0,45.9 407.2,45.7 408.5,45.5 409.8,45.2 411.0,46.2 412.3,45.8 413.5,46.0 414.8,45.2 416.0,46.1 417.3,45.4 418.6,45.8 419.8,45.5 421.1,46.1 422.3,45.9 423.6,45.0 424.9,45.7 426.1,45.3 427.4,45.7 428.6,45.3 429.9,45.6 431.1,45.5 432.4,46.0 433.7,45.3 434.9,45.5 436.2,45.4 437.4,45.7 438.7,45.4 439.9,46.0 441.2,46.0 442.5,45.9 443.7,45.4 445.0,46.1 446.2,45.7 447.5,45.5 448.8,45.5 450.0,45.5 451.3,45.7 452.5,46.0 453.8,45.5 455.1,45.9 456.3,46.1 457.6,46.0 458.8,45.5 460.1,46.1 461.3,45.8 462.6,46.0 463.9,45.4 465.1,46.2 466.4,45.6 467.6,45.6 468.9,45.4 470.1,45.7 471.4,45.7 472.7,46.0 473.9,45.6 475.2,45.1 476.4,45.5 477.7,45.6 479.0,45.8 480.2,45.6 481.5,44.8 482.7,45.1 484.0,46.0 485.2,45.7 486.5,45.7 487.8,45.9 489.0,45.1 490.3,45.7 491.5,45.5 492.8,45.8 494.1,45.5 495.3,45.6 496.6,45.1 497.8,46.0 499.1,45.4 500.4,45.2 501.6,45.6 502.9,45.0 504.1,46.1 505.4,46.1 506.6,45.2 507.9,45.7 509.2,45.6 510.4,45.3 511.7,45.7 512.9,45.8 514.2,45.2 515.5,45.1 516.7,45.3 518.0,45.4 519.2,45.6 520.5,45.6 521.7,45.6 523.0,45.7 524.3,45.9 525.5,45.5 526.8,45.0 528.0,45.2 529.3,45.7 530.5,45.4 531.8,45.4 533.1,45.7 534.3,45.8 535.6,45.8 536.8,45.6 538.1,45.2 539.4,45.4 540.6,45.2 541.9,46.0 543.1,45.6 544.4,45.2 545.6,45.4 546.9,45.4 548.2,45.6 549.4,45.4 550.7,45.2 551.9,45.7 553.2,45.8 554.5,44.9 555.7,45.5 557.0,44.8 558.2,45.7 559.5,45.6 560.8,45.7 562.0,46.0 563.3,45.4 564.5,45.9 565.8,46.4 567.0,45.5 568.3,45.5 569.6,45.4 570.8,45.4 572.1,45.2 573.3,45.5 574.6,44.9 575.9,45.1 577.1,45.7 578.4,45.8 579.6,45.9 580.9,46.1 582.1,45.5 583.4,45.6 584.7,45.2 585.9,45.3 587.2,46.0 588.4,45.3 589.7,45.6 591.0,45.5 592.2,45.5 593.5,45.3 594.7,45.9 596.0,45.5 597.2,45.8 598.5,45.2 599.8,45.2 601.0,45.7 602.3,45.3 603.5,44.9 604.8,44.9 606.0,45.9 607.3,46.3 608.6,45.0 609.8,44.9 611.1,45.3 612.3,45.2 613.6,45.7 614.9,45.3 616.1,45.5 617.4,46.2 618.6,45.8 619.9,45.9 621.1,44.8 622.4,46.2 623.7,45.4 624.9,45.6 626.2,45.3 627.4,45.5 628.7,45.9 630.0,45.2 631.2,45.3 632.5,45.5 633.7,45.7 635.0,45.6 636.2,45.4 637.5,45.8 638.8,45.2 640.0,45.6 641.3,45.2 642.5,45.3 643.8,45.8 645.1,45.3 646.3,45.0 647.6,45.8 648.8,45.3 650.1,45.2 651.4,44.9 652.6,45.2 653.9,44.6 655.1,45.3 656.4,45.6 657.6,45.3 658.9,44.9 660.2,45.5 661.4,44.9 662.7,46.1 663.9,45.5 665.2,45.8 666.5,45.2 667.7,44.6 669.0,45.4 670.2,45.5 671.5,45.3 672.7,44.9 674.0,45.3 675.3,45.7 676.5,45.4 677.8,45.7 679.0,45.3 680.3,45.3 681.5,45.1 682.8,45.2 684.1,45.3 685.3,45.0 686.6,45.3 687.8,45.0 689.1,45.7 690.4,46.2 691.6,45.3 692.9,45.6 694.1,45.3 695.4,45.4 696.6,45.5 697.9,45.2 699.2,45.3 700.4,45.2 701.7,45.0 702.9,45.3 704.2,45.2 705.5,45.0 706.7,45.5 708.0,45.3 709.2,45.4 710.5,45.3 711.8,45.7 713.0,45.8 714.3,45.2 715.5,45.2 716.8,45.3 718.0,45.9 719.3,45.4 720.6,44.8 721.8,45.4 723.1,45.1 724.3,45.7 725.6,45.2 726.9,45.3 728.1,45.0 729.4,44.9 730.6,45.3 731.9,45.7 733.1,45.2 734.4,45.0 735.7,45.0 736.9,45.0 738.2,45.3 739.4,45.7 740.7,45.3 742.0,45.5 743.2,45.6 744.5,44.7 745.7,46.0 747.0,45.2 748.2,45.3 749.5,45.6 750.8,45.4 752.0,44.9 753.3,45.0 754.5,45.2 755.8,45.6 757.0,45.5 758.3,45.7 759.6,45.5 760.8,45.6 762.1,45.4 763.3,45.4 764.6,45.7 765.9,45.9 767.1,45.5 768.4,45.4 769.6,45.6 770.9,45.9 772.1,45.0 773.4,45.5 774.7,45.6 775.9,46.1 777.2,45.8 778.4,45.7 779.7,45.8 781.0,45.2 782.2,45.8 783.5,45.4 784.7,45.6 786.0,45.6 787.2,44.7 788.5,45.0 789.8,45.0 791.0,45.6 792.3,45.3 793.5,45.2 794.8,45.5 796.1,45.8 797.3,45.4 798.6,45.6 799.8,44.8 801.1,45.8 802.4,44.9 803.6,45.6 804.9,44.8 806.1,45.7 807.4,45.6 808.6,45.4 809.9,45.7 811.2,45.7 812.4,45.4 813.7,45.2 814.9,45.9 816.2,45.5 817.5,45.5 818.7,45.8 820.0,45.1 821.2,44.9 822.5,45.7 823.7,45.6 825.0,45.8" fill="none" stroke="#e8833a" stroke-width="2"/>
+  <line x1="93.90833333333333" y1="81.72" x2="93.90833333333333" y2="127.72" stroke="#c0392b" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="101.90833333333333" y="125.72" font-size="12" fill="#c0392b">passes tuned REINFORCE at iter 19</text>
+</svg>
+<figcaption><b>Figure 8 — Discovery in miniature.</b> Exact return \(J(\theta_8)\) of a fresh
+agent after 8 updates by the current rule, logged at every meta-iteration of the run shown in the
+transcript above (single seed; the curve is raw, not smoothed — each point uses freshly sampled
+trajectories, hence the flicker). The rule passes the best REINFORCE from a five-point
+learning-rate sweep at iteration 19 and saturates within ~2% of the optimal policy.
+</figcaption>
+</figure>
+
+<p>Within ~50 meta-iterations (a couple of minutes on a laptop CPU; Figure&nbsp;8), the discovered
+rule trains a fresh random agent to <b>0.98</b> of optimal in 8 updates. The honest baseline: REINFORCE with its
+learning rate swept over {0.1, 0.3, 1, 3, 10} and given the identical data budget reaches
+<b>0.85</b>. The meta-learned rule found something better than the textbook estimator for this
+world — presumably some blend of "credit the actions that preceded reward, sharply, with
+backward-propagated certainty" that a 16-unit RNN can express. This is the DiscoRL result in
+miniature, and it falls out of forty lines of inner loop and one <code>jax.grad</code>.</p>
+
+<div class="warn">
+<b>Honest footnote</b> — In this toy, the prediction channel \(y\) stays near-uniform after
+meta-training: the corridor is solvable with policy targets alone, so the rule never needs to
+invent prediction semantics, and the probe prints confirm it. That itself is instructive — discovered
+predictions earn their keep only when the task demands information the policy target can't carry
+(long horizons, partial observability, sparse rewards far beyond the bootstrap window). If you want
+to watch \(y\) come alive, stretch the chain past the meta-net's horizon, randomize the goal
+position so the policy can't memorize it, or hide state. That is, rebuild in miniature the reason
+the real thing was discovered on Atari + ProcGen + DMLab and not on gridworlds — the paper's
+"toy environments" ablation (IQM 3.4 vs 11.6) is exactly this phenomenon at scale.
+</div>
+
+<h3>7.1 The MixFlow step, concretely</h3>
+
+<p>Part two of the script re-runs one meta-gradient with the inner step wrapped in a
+<code>custom_vjp</code> that implements §6 by hand — the backward rule does <em>one</em>
+forward-over-reverse JVP of the inner gradient function and assembles both second-order products
+from it:</p>
+
+<pre><code class="language-python">def make_mixflow_step(trajs):
+    def inner_grad(theta, eta):                  # th -&gt; (grad_th L, grad_eta L)
+        return jax.grad(batched_loss, argnums=(0, 1))(theta, eta, trajs)
+
+    def primal(theta, eta):
+        g_theta = jax.grad(batched_loss)(theta, eta, trajs)
+        return jax.tree.map(lambda p, gi: p - ALPHA * gi, theta, g_theta)
+
+    @jax.custom_vjp
+    def step(theta, eta):
+        return primal(theta, eta)
+
+    def fwd(theta, eta):
+        return primal(theta, eta), (theta, eta)
+
+    def bwd(res, v):                             # v = dJ/d theta_{k+1}
+        theta, eta = res
+        # ONE forward-over-reverse JVP gives both second-order products:
+        #   Hv = (d2L/dth2) v          (Schwarz: == v.(d2L/dth2))
+        #   Mv = (d2L/dth deta)^T v    (Schwarz: == v.(d(grad_th L)/d eta))
+        _, (Hv, Mv) = jax.jvp(lambda th: inner_grad(th, eta), (theta,), (v,))
+        v_theta = jax.tree.map(lambda a, b: a - ALPHA * b, v, Hv)   # (I-aH)^T v
+        v_eta = jax.tree.map(lambda b: -ALPHA * b, Mv)              # -a C^T v
+        return v_theta, v_eta
+
+    step.defvjp(fwd, bwd)
+    return step
+</code></pre>
+
+<p>Note how <code>bwd</code> is a line-for-line transcription of the reverse recursion from §4.2:
+\(v_{k} = (I - \alpha H_k)^\top v_{k+1}\) continuing left, \(-\alpha\,C_k^\top v_{k+1}\) deposited
+on \(\eta\). The script checks the result against the naive nested <code>jax.grad</code> and gets
+agreement to ~\(10^{-7}\) relative — float32 roundoff — which is the Schwarz-symmetry guarantee
+made empirical. In the toy the memory win is invisible (everything is tiny); at DiscoRL's batch
+sizes it's the whole ballgame.</p>
+
+<h3>7.2 Toy ↔ real system dictionary</h3>
+
+<table>
+<tr><th>Component</th><th>Toy</th><th>DiscoRL production</th></tr>
+<tr><td>Inner objective</td><td>KL(\(\hat\pi\|\pi\)) + KL(\(\hat y\|y\))</td><td>+ KL for \(z\), aux losses for \(q\) (Retrace two-hot) and \(p\); weights 1/1/1/0.2/1</td></tr>
+<tr><td>Meta-network</td><td>16-unit backwards RNN</td><td>256-unit backwards LSTM + 128-unit lifetime LSTM, action-shared convs, ~20 engineered input transforms (td-pairs, sign-log, target-net copies)</td></tr>
+<tr><td>Inner optimizer</td><td>SGD, α=5</td><td>Adam (stop-grad denominator) + clip(1.0), lr 3e-4, batch 96×29, 90% replay</td></tr>
+<tr><td>\(\nabla_\theta J\)</td><td>exact DP return (differentiable)</td><td>advantage actor-critic; meta-value fn w/ V-trace, γ=0.997, TD(0.95); normalized advantage; held-out rollouts</td></tr>
+<tr><td>Unroll / truncation</td><td>full 8 updates from init</td><td>sliding window of 20 updates over lifetimes of up to 200M steps; agent resets, budget mixture</td></tr>
+<tr><td>Population</td><td>1 agent, 1 env</td><td>128–206 agents over 57–103 envs; per-agent Adam then average; pmean across 1024–2048 TPUv3 cores, 60+ hours</td></tr>
+<tr><td>Stabilizers</td><td>meta-grad clip 1.0</td><td>+ entropy bonus on \(y,z\), KL trust region to EMA policy, target centering, advantage normalization</td></tr>
+<tr><td>Second-order autodiff</td><td>naive nested grad (and the custom_vjp demo)</td><td>MixFlow-MG throughout</td></tr>
+</table>
+
+<!-- ================================================================ -->
+<h2 id="sec8"><span class="secno">8</span>What the toy hides: the real system at full size</h2>
+
+<p>A few production facts worth keeping in your head when you reason about extensions, all from the
+Methods section and the released config:</p>
+
+<ul>
+<li><b>Scale of discovery.</b> Disco57: 128 agents cycling the 57 Atari games, 1024 TPUv3 cores,
+64 hours. Disco103: 206 agents over Atari + ProcGen + DMLab-30, 2048 TPUv3 cores, 60 hours. The best
+rule emerged after about <b>3 simulated lifetimes per game</b> (~600M steps/game) — cheaper than the
+hyperparameter sweeps most labs run to tune a hand-designed agent, which is the efficiency argument
+hiding inside the paper.</li>
+<li><b>The rule transfers up.</b> Discovery used small agents; evaluation used MuZero-sized
+networks (4 residual conv blocks of 256/384/384/256, 768-d FC, 1024-d LSTM). The rule survived the
+size jump, plus replay-ratio and optimizer sweeps (Extended Data Fig. 1) — robustness that
+hand-designed algorithms often lack.</li>
+<li><b>Data &gt; architecture, again.</b> Swapping the meta-LSTM for a transformer: no significant
+change (Extended Data Fig. 3). Growing the environment set from 14 → 103: monotone improvement on
+held-out ProcGen (Fig. 3b). The paper's closing claim — the discovered rule's quality is a function
+of the <em>data (environments) and compute</em> poured into discovery, not of meta-architectural
+cleverness — is the bitter lesson, now operating one level up.</li>
+<li><b>And it generalizes.</b> Disco57, discovered purely on Atari, was SOTA on ProcGen (which it
+never saw), placed 3rd-equivalent on the NetHack NeurIPS Challenge leaderboard without domain
+knowledge, and Disco103 hits human-level Crafter and near-MuZero Sokoban. Held-out generalization
+is the headline result; everything in §4–§6 is the machinery that bought it.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="sec9"><span class="secno">9</span>Where I'd push next</h2>
+
+<p>If DiscoRL's lesson is "the update rule is learnable", the obvious follow-up is: <em>what's still
+hand-designed, and what happens when each piece falls?</em> Ranked roughly by how tractable I think
+they are from where the code stands today:</p>
+
+<ol>
+<li><b>Learn the optimizer.</b> The inner Adam (β₁, β₂, the stop-grad denominator, clipping, the
+learning rate itself) is hand-picked and frozen. The cleanest first experiment: give the meta-network
+a second output head that modulates a per-update step-size (or per-head step-sizes) from the same
+lifetime-LSTM state that already tracks learning dynamics. The MixFlow-MG reparameterization
+\(\Upsilon(\nabla L, \theta, \upsilon, \eta)\) is <em>already</em> the right abstraction — the
+optimizer is just another differentiable block between gradient and parameters, begging for
+\(\eta\) to reach into it.</li>
+
+<li><b>Learn the exploration.</b> Agents act by sampling \(\pi\); nothing lets the rule ask for
+information. Expose the <em>behavior</em> policy as a meta-network output (a target for an
+exploration head, say), and the rule can discover its own intrinsic-motivation scheme. The
+paper's analysis already shows \(y\) spiking before salient events — the rule built a surprise
+detector; it just has no lever to act on it.</li>
+
+<li><b>Unfreeze the meta-objective.</b> Today the outer loss is hand-designed: discounted return,
+γ=0.997, V-trace advantages, entropy regularizers. That's a human prior on <em>what learning is
+for</em>. Options going up the ladder: meta-learn the outer discount/regularizer weights
+(gradients through gradients through gradients — the same recursion, one level deeper, and MixFlow
+composes); or replace lifetime return with regret-style or area-under-curve objectives that reward
+fast learning rather than final performance.</li>
+
+<li><b>Break the 20-update horizon.</b> Truncated windows make the rule myopic about its own
+long-term effects (e.g., teaching representations that pay off millions of steps later). Three
+escape routes: (a) implicit differentiation at approximate inner fixed points — cheap but assumes
+stationarity that RL agents don't have; (b) hybrid ES-plus-gradients: evolution strategies give
+unbiased lifetime-horizon meta-gradients while the backprop term gives variance-reduced local
+detail (and ES needs no second-order memory at all); (c) lean harder on the lifetime meta-RNN:
+its state already spans whole lives — train richer summaries into it so the truncated window can
+"see" the past it can't differentiate through.</li>
+
+<li><b>Make the environment distribution a player.</b> Fig. 3b is a scaling law in environments.
+Hand-curating 103 of them was explicitly <em>not</em> needed ("we simply used popular benchmarks") —
+which suggests the next multiplier is an automatic curriculum: a generator that proposes worlds
+where the current rule learns <em>worst</em> (POET-style open-endedness, or generative world models
+as the environment factory). Discovery compute then buys not just a better rule but a better
+<em>distribution of teachers</em> for the rule.</li>
+
+<li><b>Distill the rule into something we can read.</b> Disco103 is 600-dim targets from an LSTM —
+a superb artifact and a terrible textbook. Symbolic regression / program distillation over the
+meta-net's input-output behavior (fit closed-form target formulas to its targets across regimes,
+then ablate) could extract the human-readable core: how does its bootstrapping differ from
+TD(λ)? what is the discovered \(y\)-semantics in equations? I've started poking at this on a
+research branch of my Craftax repro, and it feels like the highest-leverage <em>science</em> per
+GPU-hour available here: the discovery loop found something; the distillation loop tells us what.</li>
+
+<li><b>Self-referential closure.</b> The end state Schmidhuber kept writing about: the rule that
+improves the rule. Concretely imaginable now — the meta-optimization step (Adam on \(\eta\), the
+window length, the population aggregation) is itself a differentiable program, so a
+meta-meta-network could produce <em>its</em> targets. The recursion in §4.2 doesn't care how many
+levels it has; memory does (each level multiplies the MixFlow problem), and stability really does.
+Before the full ouroboros, a modest version: use Disco-style discovery to learn the rule <em>for
+training meta-networks</em> — bootstrapping the discovery process with its own product once is the
+two-level proof of concept.</li>
+</ol>
+
+<div class="intuition">
+<b>The one-sentence version</b> — DiscoRL demonstrated that "experiences of agents → gradient →
+better learning rule" is a working pipeline; every hand-set knob that remains (optimizer,
+exploration, objective, horizon, environment set, and the discovery loop itself) is now a target
+for the same move, and the calculus in §4 plus the memory trick in §6 is exactly the toolkit each
+of those moves will need.
+</div>
+
+<!-- ================================================================ -->
+<h2 id="sec10"><span class="secno">10</span>References</h2>
+
+<ol class="footnote" style="line-height: 1.9;">
+<li>Oh, J., Farquhar, G., Kemaev, I., Calian, D.A., Hessel, M., Zintgraf, L., Singh, S.,
+van Hasselt, H., Silver, D. <i>Discovering state-of-the-art reinforcement learning algorithms.</i>
+Nature 648, 312–319 (2025). <a href="https://doi.org/10.1038/s41586-025-09761-x">doi:10.1038/s41586-025-09761-x</a></li>
+<li>Kemaev, I., Calian, D.A., Zintgraf, L.M., Farquhar, G., van Hasselt, H.
+<i>Scalable Meta-Learning via Mixed-Mode Differentiation</i> (MixFlow-MG). ICML 2025, PMLR 267.
+<a href="https://arxiv.org/abs/2505.00793">arXiv:2505.00793</a></li>
+<li>google-deepmind/disco_rl — released harness, Disco103 weights, and the
+<code>meta_train.ipynb</code> / <code>eval.ipynb</code> colabs.
+<a href="https://github.com/google-deepmind/disco_rl">github.com/google-deepmind/disco_rl</a></li>
+<li>Oh, J. et al. <i>Discovering reinforcement learning algorithms</i> (LPG). NeurIPS 2020 —
+the targets+KL design's ancestor. <a href="https://arxiv.org/abs/2007.08794">arXiv:2007.08794</a></li>
+<li>Xu, Z., van Hasselt, H., Silver, D. <i>Meta-gradient reinforcement learning.</i> NeurIPS 2018 —
+the \(\nabla_\eta\theta\cdot\nabla_\theta J\) decomposition. <a href="https://arxiv.org/abs/1805.09801">arXiv:1805.09801</a></li>
+<li>Hessel, M. et al. <i>Podracer architectures for scalable reinforcement learning.</i>
+<a href="https://arxiv.org/abs/2104.06272">arXiv:2104.06272</a> — the TPU population infrastructure pattern.</li>
+<li>This post's companion code: <code>blog/toy_discorl.py</code> (chain-MDP meta-training + MixFlow
+custom_vjp demo), and my Craftax-Classic reproduction of Disco103 evaluation in the same repo.</li>
+</ol>
+
+<hr>
+<p class="footnote">Written after reproducing Disco103 on Craftax-Classic pixels and spending
+quality time inside <code>disco_rl</code>'s source. All equations cross-checked against the paper's
+Methods, the released code, and a running toy implementation; mistakes that survived are mine.
+If you build the longer-chain version where \(y\) wakes up — or distill what Disco actually
+computes — I want to hear about it.</p>
+
+</main>
+</body>
+</html>
